@@ -4,7 +4,8 @@
 
 ## デフォルト（命中率特化モード / 推奨）
 
-5口のうち少なくとも1口が3個以上に届く確率を最大化。組間重複を極小化した coverage-first ポートフォリオ。
+履歴非依存で5口を完全非重複に構築（coverage-first、backtracking）。
+「少なくとも1口が3個以上に届く確率」を近似的に高める設計。
 
 ### ロト6
 
@@ -30,7 +31,7 @@ lp.run_hitprob(draws, "loto7")
 
 ## EV特化モード（配当分配最適化）
 
-1等を狙う想定で、他人と被りにくい不人気数字構成の固定ポートフォリオ。
+1等を狙う想定で、他人と被りにくい不人気数字構成の固定ポートフォリオ（seed=0）。
 
 ```python
 lp.run(draws, "loto7", ev_mode=True)
@@ -38,14 +39,14 @@ lp.run(draws, "loto7", ev_mode=True)
 
 ## モード比較（compare）
 
-coverage（標準） vs hitprob（命中率特化）の Monte Carlo 10万回比較。
+coverage（標準） vs hitprob（命中率特化）の exact probability 比較（全組合せ列挙、決定論的）。
 
 ```python
 result = lp.compare_coverage_vs_hitprob(draws, "loto7")
 for k in ("coverage", "hitprob"):
     est = result[k]["estimate"]
     print(f"[{k}] union={est['union_size']} avg_overlap={est['avg_pair_overlap']:.2f} "
-          f"any3={100*est['any3']:.2f}% any4={100*est['any4']:.2f}%")
+          f"any3={100*est['any3']:.4f}% any4={100*est['any4']:.4f}%")
 ```
 
 ## 組数指定（例: 10組）
@@ -59,13 +60,14 @@ lp.run(draws, "loto7", num_sets=10)
 
 - ロト6/7 は独立抽選。過去データから **5口合計の期待ヒット数を上げることは数学的に不可能**
 - 改善可能なのは次の2軸のみ：
-  - **命中率特化（hitprob）**: 5口内の重複を削り和集合を広げることで「少なくとも1口で3個以上」の確率を上げる。期待値は不変
+  - **命中率特化（hitprob）**: 完全非重複の5口で和集合を最大化することで「少なくとも1口で3個以上」の確率を近似的に高める。期待値は不変、履歴完全非依存
   - **配当分配最適化（ev）**: 他人と被りにくい不人気数字構成を選ぶことで、当たった時の分配金を増やす。固定ポートフォリオ（seed=0）
-- 実測値（Monte Carlo 10万回）:
-  - loto7: coverage 40.96% → hitprob 50.63% (+9.67pt、≥3個を1口以上含む確率)
-  - loto6: coverage 12.46% → hitprob 13.67% (+1.21pt)
-  - ≥4個の改善は小さい（loto6 +0pt、loto7 +0.43pt）
-- どのモードも的中率は理論期待値（loto6: 4.19/回, loto7: 6.62/回）付近に収束する
+- Exact probability（全組合せ列挙による決定論的値、v5.4 で MC から置換）:
+  - loto7: coverage any3=40.9017% → hitprob 50.9627% (+10.06pt)
+  - loto6: coverage any3=12.4266% → hitprob 13.5171% (+1.09pt)
+  - ≥4個の改善は loto6 0.03pt, loto7 0.46pt（小さい。過剰期待禁物）
+- どのモードも的中率は理論期待値（loto6: 4.186/回, loto7: 6.622/回）に長期収束する
+- ロト7 で「本数字3個」はボーナス次第で6等入賞。ボーナスをCSVに含めない限り入賞可否は判定できないため、バックテスト表示は「本数字3個以上」と中立表記
 
 ## 厳守
 - 確認・質問・選択肢は禁止。即実行

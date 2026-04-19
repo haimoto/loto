@@ -21,12 +21,6 @@ from collections import Counter
 
 import loto_predictor_chatgpt as lp
 
-PRIZE_THRESHOLDS = {
-    "loto6": {5: "5等(3個)", 4: "4等(4個)", 3: "3等(5個)", 2: "2等(5+B)", 1: "1等(6個)"},
-    "loto7": {5: "6等(3+B)", 4: "5等(4個)", 3: "4等(5個)", 2: "3等(6個)", 1: "2等(6+B)/1等(7)"},
-}
-
-
 def _rand_sets(cfg, num_sets, rng):
     lo, hi = cfg["range"]
     pool = list(range(lo, hi + 1))
@@ -114,31 +108,36 @@ def _hits(sets, winning):
     return [len(set(s) & w) for s in sets]
 
 
-def _summary(label, per_round_total, per_set_hits, ev_proxy=None):
+def _summary(label, per_round_total, per_set_hits, cfg, ev_proxy=None):
     n = len(per_round_total)
     avg_total = statistics.mean(per_round_total)
     med_total = statistics.median(per_round_total)
     avg_per_set = statistics.mean(per_set_hits)
     hit_counter = Counter(per_set_hits)
-    prize_sets = sum(hit_counter.get(k, 0) for k in (3, 4, 5, 6, 7))
+    ge3_sets = sum(hit_counter.get(k, 0) for k in (3, 4, 5, 6, 7))
     print(f"[{label}]")
     print(f"  平均ヒット/回: {avg_total:.2f}  中央値: {med_total:.1f}  試行: {n}回 × 5組 = {len(per_set_hits)}組")
     print(f"  平均ヒット/組: {avg_per_set:.3f}")
     hist_parts = [f"{k}個:{hit_counter.get(k, 0)}" for k in range(0, 8) if hit_counter.get(k, 0)]
     print(f"  分布: {'  '.join(hist_parts)}")
-    print(f"  3個以上（入賞相当）: {prize_sets}組 / {len(per_set_hits)}組 ({100*prize_sets/len(per_set_hits):.2f}%)")
+    # Loto6: 本数字3個で5等入賞。Loto7: 本数字3個はボーナス次第で6等、ボーナス無しCSVでは判定不可。
+    # 誤誘導を避け、ここでは単に「本数字3個以上」と表記する。
+    print(f"  本数字3個以上: {ge3_sets}組 / {len(per_set_hits)}組 ({100*ge3_sets/len(per_set_hits):.2f}%)")
     if ev_proxy:
+        ht = cfg.get("high_threshold", 31)
         print(f"  EV不人気スコア平均: {ev_proxy['ev_avg']:.2f}  "
-              f"高位(>31)平均: {ev_proxy['high_avg']:.2f}個/組  "
+              f"高位(>{ht})平均: {ev_proxy['high_avg']:.2f}個/組  "
               f"日付内のみ率: {100*ev_proxy['date_only_rate']:.1f}%  "
               f"合計平均: {ev_proxy['sum_avg']:.1f}")
 
 
 def _ev_proxy(all_sets, cfg):
-    # Proxy for expected payout share: higher EV score, more high numbers, and fewer
-    # calendar-date-only combinations all correlate with less crowded jackpot tiers.
+    # Proxy for expected payout share under the EV-mode objective: EV score,
+    # number of >=high_threshold picks, and avoidance of "all <= 31" combos
+    # all correlate with less crowded jackpot tiers.
+    ht = cfg.get("high_threshold", 31)
     ev_scores = [lp._ev_unpopularity(s, cfg) for s in all_sets]
-    highs = [sum(1 for n in s if n > 31) for s in all_sets]
+    highs = [sum(1 for n in s if n > ht) for s in all_sets]
     date_only = sum(1 for s in all_sets if all(n <= 31 for n in s))
     sums = [sum(s) for s in all_sets]
     return {
@@ -149,13 +148,23 @@ def _ev_proxy(all_sets, cfg):
     }
 
 
-def _t_stat(a, b):
-    # two-sample Welch t statistic — rough sanity check, not exact p-value.
-    ma, mb = statistics.mean(a), statistics.mean(b)
-    va, vb = statistics.variance(a), statistics.variance(b)
-    na, nb = len(a), len(b)
-    se = ((va / na) + (vb / nb)) ** 0.5 or 1e-9
-    return (ma - mb) / se
+def _paired_sign_test(a, b):
+    # Paired comparison: for each round i, which strategy scored more hits?
+    # Returns (wins_a, losses_a, ties, two_sided_p_rough).
+    assert len(a) == len(b)
+    wins = sum(1 for x, y in zip(a, b) if x > y)
+    losses = sum(1 for x, y in zip(a, b) if x < y)
+    ties = len(a) - wins - losses
+    # Sign-test p-value via binomial tail with n = wins + losses.
+    n = wins + losses
+    if n == 0:
+        return wins, losses, ties, 1.0
+    k = min(wins, losses)
+    # Two-sided p-value approximated from binomial CDF tail.
+    from math import comb
+    tail = sum(comb(n, i) for i in range(k + 1)) / (2 ** n)
+    p = min(1.0, 2 * tail)
+    return wins, losses, ties, p
 
 
 def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
@@ -229,7 +238,7 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
               "relaxed": "制約緩和", "hitprob": "命中率特化", "random": "ランダム"}
     for m in modes:
         proxy = _ev_proxy(all_sets[m], cfg)
-        _summary(labels[m], totals[m], per_set[m], ev_proxy=proxy)
+        _summary(labels[m], totals[m], per_set[m], cfg, ev_proxy=proxy)
         print()
 
     expected = cfg["pick"] * cfg["pick"] / (cfg["range"][1] - cfg["range"][0] + 1) * num_sets
@@ -242,10 +251,15 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
         print(f"  {labels[m]:>14s}: {100*rate:.1f}%")
     print()
 
-    print("【Welch t統計（|t|>2 でランダムとの差が疑わしく有意）】")
+    # Paired sign test against the averaged random baseline. Note the random
+    # series is a 20-seed mean per round so its variance is ~1/20 of a single
+    # draw; a Welch t on that series would exaggerate significance. A paired
+    # sign test is unit-agnostic and correctly paired round-by-round.
+    print("【ランダム平均との符号検定（rounds数が小さいと検出力は低い）】")
+    print(f"  n={rounds}, H0: 各回の合計ヒット分布がランダム平均と同じ")
     for m in ("normal", "ev", "greedy", "relaxed", "hitprob"):
-        t = _t_stat(totals[m], totals["random"])
-        print(f"  {labels[m]:>14s} vs ランダム : t = {t:+.2f}")
+        w, losses, ties, p = _paired_sign_test(totals[m], totals["random"])
+        print(f"  {labels[m]:>14s}: 勝{w} 負{losses} 分{ties}  two-sided p≈{p:.3f}")
 
 
 if __name__ == "__main__":
