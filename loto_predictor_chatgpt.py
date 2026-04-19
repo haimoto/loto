@@ -1829,6 +1829,16 @@ def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfo
     """
     del draws, params_map, portfolio_map  # unused — kept for call-site compat
     cfg = LOTO_CONFIG[loto]
+    pool_size = cfg["range"][1] - cfg["range"][0] + 1
+    # hitprob は完全非重複を前提とするため、num_sets * pick がプールに収まる必要がある。
+    # loto6: pool=43, pick=6 → 最大7組 / loto7: pool=37, pick=7 → 最大5組
+    if num_sets * cfg["pick"] > pool_size:
+        max_sets = pool_size // cfg["pick"]
+        raise ValueError(
+            f"hitprob は完全非重複を前提とします。num_sets={num_sets}, pick={cfg['pick']} "
+            f"→ 合計{num_sets * cfg['pick']}番がプールサイズ{pool_size}を超過。"
+            f"{loto} の最大組数は {max_sets} 組です。"
+        )
     num_samples = HITPROB_SAMPLES.get(loto, 20000)
     candidates = _enumerate_shape_valid_candidates(cfg, num_samples=num_samples, seed=seed)
     if not candidates:
@@ -1938,10 +1948,18 @@ def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
     }
 
 
-def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact"):
+def _probe(portfolio, loto, method, trials):
+    """Pick exact vs MC estimator. trials is only used for MC."""
+    if method == "exact":
+        return exact_hitprob(portfolio, loto)
+    return estimate_hitprob(portfolio, loto, trials=trials)
+
+
+def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     """Apples-to-apples comparison of legacy coverage vs hitprob mode.
 
     method: "exact" (full enumeration, deterministic) or "mc" (Monte Carlo).
+    trials: ignored when method="exact"; passed to estimate_hitprob otherwise.
     """
     _, cov_gen, _ = generate_from_draws(
         draws, loto, num_sets=num_sets,
@@ -1951,23 +1969,25 @@ def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact"):
     _, hit_gen, _ = generate_hitprob_from_draws(draws, loto, num_sets=num_sets)
     cov_port = [nums for _, nums in cov_gen.sets]
     hit_port = [nums for _, nums in hit_gen.sets]
-    probe = exact_hitprob if method == "exact" else estimate_hitprob
     return {
-        "coverage": {"portfolio": cov_port, "estimate": probe(cov_port, loto)},
-        "hitprob": {"portfolio": hit_port, "estimate": probe(hit_port, loto)},
+        "coverage": {"portfolio": cov_port, "estimate": _probe(cov_port, loto, method, trials)},
+        "hitprob": {"portfolio": hit_port, "estimate": _probe(hit_port, loto, method, trials)},
     }
 
 
-def run_hitprob(draws, loto, num_sets=5, method="exact"):
-    """Run hitprob mode and print a coverage-first report with exact probabilities."""
+def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
+    """Run hitprob mode and print a coverage-first report.
+
+    method: "exact" (default, full enumeration) or "mc".
+    trials: ignored when method="exact"; used by the MC fallback otherwise.
+    """
     if len(draws) < 10:
         print(f"エラー: データ不足（{len(draws)}回）")
         return
 
     _, gen, _ = generate_hitprob_from_draws(draws, loto, num_sets=num_sets)
     portfolio = [nums for _, nums in gen.sets]
-    probe = exact_hitprob if method == "exact" else estimate_hitprob
-    est = probe(portfolio, loto)
+    est = _probe(portfolio, loto, method, trials)
 
     label_method = "exact" if est["method"] == "exact" else "Monte Carlo"
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")

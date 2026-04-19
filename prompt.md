@@ -49,11 +49,21 @@ for k in ("coverage", "hitprob"):
           f"any3={100*est['any3']:.4f}% any4={100*est['any4']:.4f}%")
 ```
 
-## 組数指定（例: 10組）
+## 組数指定
+
+hitprob は完全非重複を前提とするため、組数には上限があります:
+- loto6: 最大 7 組（43 / 6 = 7.2）
+- loto7: 最大 5 組（37 / 7 = 5.2）
+
+上限を超える場合は coverage / ev モードで対応:
 
 ```python
-lp.run_hitprob(draws, "loto7", num_sets=10)
+# hitprob の上限内
+lp.run_hitprob(draws, "loto6", num_sets=7)
+
+# 上限を超える大量組数は coverage / ev モードで
 lp.run(draws, "loto7", num_sets=10)
+lp.run(draws, "loto7", num_sets=10, ev_mode=True)
 ```
 
 ## 設計方針（前提）
@@ -65,7 +75,7 @@ lp.run(draws, "loto7", num_sets=10)
 - Exact probability（全組合せ列挙による決定論的値、v5.4 で MC から置換）:
   - loto7: coverage any3=40.9017% → hitprob 50.9627% (+10.06pt)
   - loto6: coverage any3=12.4266% → hitprob 13.5171% (+1.09pt)
-  - ≥4個の改善は loto6 0.03pt, loto7 0.46pt（小さい。過剰期待禁物）
+  - ≥4個の改善は loto6 +0.003pt, loto7 +0.25pt（小さい。過剰期待禁物）
 - どのモードも的中率は理論期待値（loto6: 4.186/回, loto7: 6.622/回）に長期収束する
 - ロト7 で「本数字3個」はボーナス次第で6等入賞。ボーナスをCSVに含めない限り入賞可否は判定できないため、バックテスト表示は「本数字3個以上」と中立表記
 
