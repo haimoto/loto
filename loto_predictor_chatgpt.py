@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.3
+ロト6/ロト7 予測スクリプト v5.4
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -9,39 +9,47 @@
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
 
-v5.3（2026-04-19 命中率特化モード追加）の変更:
-- `run_hitprob` / `generate_hitprob_from_draws` / `estimate_hitprob` /
-  `compare_coverage_vs_hitprob` を追加。coverage-first で5口の和集合を
-  広く取り、組間重複を極小化する（loto6は完全 disjoint まで到達）。
-  ‣ 期待ヒット数は変えられない（数学的事実として明示）
-  ‣ any3（5口のうち1口以上で3個以上）は Monte Carlo 10万回で大幅改善
-    - loto6: coverage 12.46% → hitprob 13.67%（+1.21pt）
-    - loto7: coverage 40.96% → hitprob 50.63%（+9.67pt）
-  ‣ any4 の改善は小さい（loto6 +0pt, loto7 +0.43pt）。正直に説明すべき
-- モード体系: coverage（既存標準） / ev（配当分配） / hitprob（命中率）
+v5.4（2026-04-19 Codex レビュー対応）の変更:
+- hitprob を真の最適化へ: ランダムサンプル + greedy の近似を、履歴非依存の
+  backtracking 完全非重複ポートフォリオ構築に置換。loto6/7 とも常に完全
+  disjoint（loto7: union=35, loto6: union=30）を返す。
+- 確率表示を exact へ: Monte Carlo（trials=10万）を全組合せ列挙による
+  exact_hitprob に置換（loto6: C(43,6)=6M, loto7: C(37,7)=10M）。
+  estimate_hitprob は MC 版として残存（back-compat）。
+- 実測値（exact）:
+  - loto7: coverage any3=40.9017% → hitprob 50.9627%（+10.06pt）
+  - loto6: coverage any3=12.4266% → hitprob 13.5171%（+1.09pt）
+- hitprob は履歴完全非依存（shape_score から sum_bin 除去、seed=0 固定）。
+- backtest.py: Welch t を paired sign test に置換（random baseline が
+  20シード平均で分散 1/20 のため t 値が誤差過大だった）。
+- backtest.py: 「3個以上（入賞相当）」→「本数字3個以上」に訂正（loto7 の
+  6等は本数字3個+ボーナスのため「入賞相当」は誤り）。
+- EV 表示の high_threshold を動的化（ロト6=>31, ロト7=>25）。
+- CSV パーサーを n1..n{pick} 明示読取 + 範囲チェックに変更。ボーナス列
+  つき公式CSV も扱える。
+- dead code 削除（MODEL_PARAMS_REOPT / PORTFOLIO_PARAMS_REOPT /
+  PRIZE_THRESHOLDS）。
 
-v5.2（2026-04-19）: EV特化の高位偏重を是正。
-- `_ev_unpopularity` の high_count 加点をキャップ（pick//2+1）+ 過剰集中
-  ペナルティ（high_count > pick-2 で減点）に変更。ロト7で26-37に6/7個
-  集中する偏りを是正。
-
-v5.1（2026-04-16）: 誠実性リファクタ。EV特化=固定ポートフォリオとして明示。
-- ev_weight（dead code）削除、fully_satisfied バグ修正、ロト7 の高位閾値を
-  range 依存化（loto6=>31, loto7=>25 相当）。
+v5.3（2026-04-19）: 命中率特化モード追加（greedy近似版、v5.4 で置換済）。
+v5.2（2026-04-19）: EV 特化の高位偏重を是正（high_count キャップ + 過剰集中
+  ペナルティ）。
+v5.1（2026-04-16）: 誠実性リファクタ。ev_weight 削除、fully_satisfied 修正、
+  高位閾値の range 依存化。
 
 インターフェース:
     parse_csv(text, loto)
     run(draws, loto, num_sets=5, ev_mode=True)          # coverage / ev
-    run_hitprob(draws, loto, num_sets=5, trials=100000) # hitprob
+    run_hitprob(draws, loto, num_sets=5, method="exact") # hitprob
     generate_from_draws(draws, loto, num_sets=5, ev_mode=True)
     generate_hitprob_from_draws(draws, loto, num_sets=5)
-    estimate_hitprob(portfolio, loto, trials=100000)
-    compare_coverage_vs_hitprob(draws, loto, num_sets=5, trials=100000)
+    exact_hitprob(portfolio, loto)                      # 全組合せ列挙
+    estimate_hitprob(portfolio, loto, trials=100000)    # Monte Carlo (back-compat)
+    compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact")
 
 CLI:
     python3 loto_predictor_chatgpt.py <loto6|loto7> <csv> <hitprob|coverage|ev|compare>
 
-外部ライブラリ不要。hitprob は Monte Carlo ベース、その他は決定論的生成。
+外部ライブラリ不要。hitprob は exact 確率ベース、全モード決定論的生成。
 """
 
 from __future__ import annotations
@@ -341,8 +349,6 @@ PORTFOLIO_PARAMS = {
 }
 
 # 過学習チェック後の採用デフォルト: ベースライン参数 + 修正版 coverage を採用
-MODEL_PARAMS_REOPT = deepcopy(MODEL_PARAMS)
-PORTFOLIO_PARAMS_REOPT = deepcopy(PORTFOLIO_PARAMS)
 MODEL_PARAMS = deepcopy(MODEL_PARAMS_BASELINE)
 PORTFOLIO_PARAMS = deepcopy(PORTFOLIO_PARAMS_BASELINE)
 
@@ -372,14 +378,22 @@ class GenerateResult:
 # -- CSV パーサー --
 
 def parse_csv(text: str, loto: str) -> list[Draw]:
-    pick = LOTO_CONFIG[loto]["pick"]
+    """Parse draw CSV. Reads only the first `pick` numeric columns after
+    (draw_number, date) so trailing bonus columns are ignored cleanly.
+
+    Validates: exact pick count, no duplicates, all numbers within range.
+    Invalid rows are silently skipped.
+    """
+    cfg = LOTO_CONFIG[loto]
+    pick = cfg["pick"]
+    lo, hi = cfg["range"]
     draws = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line or any(h in line for h in ["回号", "抽選日", "draw", "date", "#"]):
             continue
         parts = [p.strip() for p in (line.split("\t") if "\t" in line else line.split(","))]
-        if len(parts) < 3:
+        if len(parts) < 2 + pick:
             continue
         num_match = "".join(c for c in parts[0] if c.isdigit())
         if not num_match:
@@ -387,12 +401,20 @@ def parse_csv(text: str, loto: str) -> list[Draw]:
         draw_num = int(num_match)
         draw_date = parts[1].strip()
         numbers = []
-        for p in parts[2:]:
-            for token in p.replace(",", " ").split():
-                token = token.strip().strip("()")
-                if token.isdigit():
-                    numbers.append(int(token))
-        if len(numbers) != pick or len(set(numbers)) != len(numbers):
+        valid = True
+        for token in parts[2:2 + pick]:
+            tok = token.strip().strip("()")
+            if not tok.isdigit():
+                valid = False
+                break
+            n = int(tok)
+            if not (lo <= n <= hi):
+                valid = False
+                break
+            numbers.append(n)
+        if not valid:
+            continue
+        if len(set(numbers)) != pick:
             continue
         draws.append(Draw(draw_num, draw_date, tuple(sorted(numbers))))
     draws.sort(key=lambda d: d.number, reverse=True)
@@ -1653,9 +1675,10 @@ def run(draws, loto, num_sets=5, ev_mode=True):
     print()
 
     if ev_mode:
-        high_cnt = [sum(1 for n in ns if n > 31) for _, ns in gen.sets]
+        ht = config.get("high_threshold", 31)
+        high_cnt = [sum(1 for n in ns if n > ht) for _, ns in gen.sets]
         date_only = sum(1 for _, ns in gen.sets if all(n <= 31 for n in ns))
-        print(f"【EV要約】高位(>31)平均: {sum(high_cnt)/len(high_cnt):.1f}個/組  日付のみ構成: {date_only}/{len(gen.sets)}組\n")
+        print(f"【EV要約】高位(>{ht})平均: {sum(high_cnt)/len(high_cnt):.1f}個/組  日付のみ構成: {date_only}/{len(gen.sets)}組\n")
 
     print("【制約チェック】")
     r = gen.sets
@@ -1682,9 +1705,9 @@ def run(draws, loto, num_sets=5, ev_mode=True):
 # この拡張が改善するのは「5口のうち少なくとも1口が3個以上に届く確率」で、
 # そのために組間重複を強く抑えた coverage-first ポートフォリオを生成します。
 
-HITPROB_CANDIDATE_SAMPLES = {
-    "loto6": 15000,
-    "loto7": 18000,
+HITPROB_SAMPLES = {
+    "loto6": 30000,
+    "loto7": 40000,
 }
 
 
@@ -1696,28 +1719,24 @@ def _hitprob_band_limits(cfg):
     return low_max, mid_max
 
 
+def _enumerate_shape_valid_candidates(cfg, num_samples, seed=0):
+    """Deterministically sample shape-balanced sets with NO history dependency.
 
-def _enumerate_hitprob_candidates(model, loto, num_samples=None, seed=0):
-    """Sample broadly from the full number space and keep only shape-balanced sets.
-
-    This intentionally ignores HOT/COLD/overdue/pair-frequency as predictive signals.
-    The portfolio objective is coverage and overlap minimization, not forecasting.
+    Filters: odd_count within ±1 of target, each of 3 bands present, no 3-consecutive,
+    band imbalance ≤2. Uses a fixed seed — this is a coverage-first tool, not a
+    forecasting one, so the output is identical run-to-run.
     """
-    cfg = LOTO_CONFIG[loto]
     lo, hi = cfg["range"]
     pick = cfg["pick"]
     pool = list(range(lo, hi + 1))
-    rng = random.Random(seed)
     target_odd = cfg["odd_even_base"][0]
     low_max, mid_max = _hitprob_band_limits(cfg)
-
-    if num_samples is None:
-        num_samples = HITPROB_CANDIDATE_SAMPLES.get(loto, 15000)
+    rng = random.Random(seed)
 
     seen = set()
     candidates = []
+    max_attempts = num_samples * 30
     attempts = 0
-    max_attempts = num_samples * 12
     while len(candidates) < num_samples and attempts < max_attempts:
         attempts += 1
         nums = tuple(sorted(rng.sample(pool, pick)))
@@ -1726,145 +1745,142 @@ def _enumerate_hitprob_candidates(model, loto, num_samples=None, seed=0):
         seen.add(nums)
         if has_triple_consecutive(nums):
             continue
-
         odd = sum(1 for n in nums if n % 2 == 1)
         if abs(odd - target_odd) > 1:
             continue
-
-        band_counts = (
-            sum(1 for n in nums if n <= low_max),
-            sum(1 for n in nums if low_max < n <= mid_max),
-            sum(1 for n in nums if n > mid_max),
-        )
-        if any(c == 0 for c in band_counts):
+        b_low = sum(1 for n in nums if n <= low_max)
+        b_mid = sum(1 for n in nums if low_max < n <= mid_max)
+        b_high = sum(1 for n in nums if n > mid_max)
+        if min(b_low, b_mid, b_high) == 0:
             continue
-        if max(band_counts) - min(band_counts) > 2:
+        if max(b_low, b_mid, b_high) - min(b_low, b_mid, b_high) > 2:
             continue
+        candidates.append({"nums": nums, "odd": odd, "bands": (b_low, b_mid, b_high)})
 
-        metrics = _candidate_metrics(nums, model, loto)
-        tail_unique = len(set(n % 10 for n in nums))
-        # Shape-only score. This is *not* a forecasting score.
-        score = 0.0
-        score += -0.50 * abs(metrics["odd"] - target_odd)
-        score += -0.15 * abs(metrics["tail_dup"] - 1)
-        score += -0.10 * abs(metrics["consec"] - 1)
-        score += -0.10 * abs(metrics["sum_bin"])
-        score += 0.05 * tail_unique
-        metrics["shape_score"] = score
-        metrics["score"] = score
-        candidates.append(metrics)
-
-    candidates.sort(
-        key=lambda m: (m.get("shape_score", 0.0), len(set(n % 10 for n in m["nums"])), -m["tail_dup"]),
-        reverse=True,
-    )
+    # Stable sort by shape compactness: closer to target_odd first, then balanced bands.
+    candidates.sort(key=lambda c: (
+        abs(c["odd"] - target_odd),
+        max(c["bands"]) - min(c["bands"]),
+        sum(c["nums"]),
+    ))
     return candidates
 
 
+def _find_disjoint_portfolio(candidates, num_sets, node_budget=2_000_000):
+    """Backtrack to find num_sets mutually-disjoint sets.
 
-def _select_hitprob_portfolio(candidates, loto, num_sets=5, overlap_schedule=(0, 1, 2)):
-    """Greedy portfolio builder that prioritizes new numbers first.
-
-    Returns (selected_metrics, fully_satisfied, used_overlap_cap).
+    Returns (portfolio, nodes_visited). portfolio is None if not found
+    within node_budget.
     """
-    chosen = []
-    for allowed_overlap in overlap_schedule:
-        chosen = []
-        used = Counter()
-        covered_pairs = set()
-        remaining = list(candidates)
+    nodes = [0]
+    result = [None]
 
-        while len(chosen) < num_sets:
-            best = None
-            best_val = None
-            for cand in remaining:
-                nums_set = set(cand["nums"])
-                if any(len(nums_set & set(prev["nums"])) > allowed_overlap for prev in chosen):
-                    continue
-                new_nums = sum(1 for n in cand["nums"] if used[n] == 0)
-                repeated = sum(1 for n in cand["nums"] if used[n] > 0)
-                new_pairs = sum(1 for p in cand["pair_keys"] if p not in covered_pairs)
-                val = (
-                    8.0 * new_nums
-                    - 5.0 * repeated
-                    + 0.15 * new_pairs
-                    + 0.20 * cand.get("shape_score", 0.0)
-                )
-                if best is None or val > best_val:
-                    best = cand
-                    best_val = val
-            if best is None:
-                break
-            chosen.append(best)
-            for n in best["nums"]:
-                used[n] += 1
-            covered_pairs.update(best["pair_keys"])
-            remaining.remove(best)
+    def backtrack(chosen, used, start):
+        if nodes[0] >= node_budget:
+            return False
+        nodes[0] += 1
+        if len(chosen) == num_sets:
+            result[0] = list(chosen)
+            return True
+        for i in range(start, len(candidates)):
+            cand = candidates[i]
+            nset = set(cand["nums"])
+            if nset & used:
+                continue
+            chosen.append(cand)
+            if backtrack(chosen, used | nset, i + 1):
+                return True
+            chosen.pop()
+        return False
 
-        if len(chosen) >= num_sets:
-            fully = all(
-                len(set(a["nums"]) & set(b["nums"])) <= allowed_overlap
-                for a, b in combinations(chosen, 2)
-            )
-            return chosen[:num_sets], fully, allowed_overlap
-
-    fully = all(
-        len(set(a["nums"]) & set(b["nums"])) <= overlap_schedule[-1]
-        for a, b in combinations(chosen, 2)
-    ) if len(chosen) >= 2 else len(chosen) == num_sets
-    return chosen[:num_sets], fully and len(chosen) == num_sets, overlap_schedule[-1]
+    backtrack([], set(), 0)
+    return result[0], nodes[0]
 
 
+_HITPROB_DEFAULT_LABELS = ("王道A", "王道B", "分散A", "分散B", "逆張り")
 
-def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfolio_map=None, seed=None):
-    """Coverage-first generator aimed at increasing the chance of >=3 hits in 5 sets.
 
-    Honest caveat: this does *not* increase the mathematical expectation of total hits.
-    It increases portfolio coverage by reducing overlap across the five generated sets.
+def _assign_hitprob_labels(portfolio, num_sets):
+    """Assign shape-sorted labels without history dependency.
+
+    Sort by (ascending sum, then ascending odd) so ordering is deterministic
+    and interpretable.
     """
-    params_map = _params_map(params_map)
-    portfolio_map = _portfolio_map(portfolio_map)
-    model = _build_model(draws, loto, params_map=params_map, selection_mode="coverage", portfolio_map=portfolio_map)
-    if seed is None:
-        seed = model["history"][0].number if model.get("history") else 0
-    candidates = _enumerate_hitprob_candidates(model, loto, seed=seed)
+    labels = list(_HITPROB_DEFAULT_LABELS[:num_sets])
+    indexed = sorted(range(len(portfolio)), key=lambda i: (sum(portfolio[i]["nums"]), portfolio[i]["odd"]))
+    out = [None] * len(portfolio)
+    for rank, idx in enumerate(indexed):
+        out[idx] = (labels[rank] if rank < len(labels) else f"組{rank+1}", portfolio[idx]["nums"])
+    return out
+
+
+def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfolio_map=None, seed=0):
+    """Coverage-first generator: build a mutually-disjoint shape-balanced portfolio.
+
+    History-independent. The result depends only on (loto, num_sets, seed).
+    `draws` is accepted for signature compatibility with other generators but
+    is not used.
+
+    Honest caveat: expected total hits is invariant (independent draws). What
+    this changes is the probability that "at least one of the 5 sets has >=3
+    hits" — by reducing inter-set overlap, the portfolio's union is enlarged.
+    For loto6 (5 x 6 = 30 ≤ 43) and loto7 (5 x 7 = 35 ≤ 37), a fully disjoint
+    portfolio is always feasible; this builder returns one.
+    """
+    del draws, params_map, portfolio_map  # unused — kept for call-site compat
+    cfg = LOTO_CONFIG[loto]
+    pool_size = cfg["range"][1] - cfg["range"][0] + 1
+    # hitprob は完全非重複を前提とするため、num_sets * pick がプールに収まる必要がある。
+    # loto6: pool=43, pick=6 → 最大7組 / loto7: pool=37, pick=7 → 最大5組
+    if num_sets * cfg["pick"] > pool_size:
+        max_sets = pool_size // cfg["pick"]
+        raise ValueError(
+            f"hitprob は完全非重複を前提とします。num_sets={num_sets}, pick={cfg['pick']} "
+            f"→ 合計{num_sets * cfg['pick']}番がプールサイズ{pool_size}を超過。"
+            f"{loto} の最大組数は {max_sets} 組です。"
+        )
+    num_samples = HITPROB_SAMPLES.get(loto, 20000)
+    candidates = _enumerate_shape_valid_candidates(cfg, num_samples=num_samples, seed=seed)
     if not candidates:
         raise RuntimeError("命中率特化候補生成失敗")
-    selected, fully_satisfied, overlap_cap = _select_hitprob_portfolio(candidates, loto, num_sets=num_sets)
-    if len(selected) < num_sets:
-        raise RuntimeError("命中率特化選択失敗")
-    for m in selected:
-        m["hitprob_overlap_cap"] = overlap_cap
-    labeled = _assign_labels(selected, num_sets)
-    gen = GenerateResult(labeled, fully_satisfied)
-    model["hitprob_overlap_cap"] = overlap_cap
-    return model, gen, selected
+    portfolio, nodes = _find_disjoint_portfolio(candidates, num_sets)
+    if portfolio is None:
+        raise RuntimeError(
+            f"完全非重複ポートフォリオ構築失敗（candidates={len(candidates)}, nodes={nodes}）"
+        )
+    labeled = _assign_hitprob_labels(portfolio, num_sets)
+    gen = GenerateResult(labeled, True)
+    return None, gen, portfolio
 
 
+def exact_hitprob(portfolio, loto):
+    """Exact portfolio-level hit probabilities via full enumeration.
 
-def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
-    """Monte Carlo estimate for portfolio-level hit probabilities."""
+    loto6: C(43,6) = 6,096,454 combinations.
+    loto7: C(37,7) = 10,295,472 combinations.
+
+    No randomness; results are deterministic and reproducible bit-for-bit.
+    """
     cfg = LOTO_CONFIG[loto]
     lo, hi = cfg["range"]
     pick = cfg["pick"]
     pool = list(range(lo, hi + 1))
-    port_sets = [set(nums) for nums in portfolio]
-    rng = random.Random(seed)
+    port_sets = [frozenset(nums) for nums in portfolio]
 
-    any3 = 0
-    any4 = 0
-    any5 = 0
-    total_hits = 0
-    for _ in range(trials):
-        win = set(rng.sample(pool, pick))
+    total = 0
+    any3 = any4 = any5 = 0
+    total_hits_sum = 0
+    for win in combinations(pool, pick):
+        win_set = set(win)
+        total += 1
         max_hit = 0
-        per_draw_total = 0
+        per_total = 0
         for nums in port_sets:
-            h = len(nums & win)
-            per_draw_total += h
+            h = len(nums & win_set)
+            per_total += h
             if h > max_hit:
                 max_hit = h
-        total_hits += per_draw_total
+        total_hits_sum += per_total
         if max_hit >= 3:
             any3 += 1
         if max_hit >= 4:
@@ -1872,11 +1888,53 @@ def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
         if max_hit >= 5:
             any5 += 1
 
-    overlaps = [
-        len(set(a) & set(b))
-        for i, a in enumerate(portfolio)
-        for b in portfolio[i + 1 :]
-    ]
+    overlaps = [len(a & b) for i, a in enumerate(port_sets) for b in port_sets[i + 1:]]
+    return {
+        "mean_total_hits": total_hits_sum / total,
+        "any3": any3 / total,
+        "any4": any4 / total,
+        "any5": any5 / total,
+        "union_size": len(set().union(*portfolio)),
+        "avg_pair_overlap": _mean(overlaps),
+        "max_pair_overlap": max(overlaps) if overlaps else 0,
+        "total_combinations": total,
+        "method": "exact",
+    }
+
+
+def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
+    """Monte Carlo estimator. Kept for back-compat; prefer `exact_hitprob`.
+
+    Returns the same keys as `exact_hitprob` (with `method="mc"`) so callers
+    can be swapped without conditional logic.
+    """
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    pool = list(range(lo, hi + 1))
+    port_sets = [set(nums) for nums in portfolio]
+    rng = random.Random(seed)
+
+    any3 = any4 = any5 = 0
+    total_hits = 0
+    for _ in range(trials):
+        win = set(rng.sample(pool, pick))
+        max_hit = 0
+        per_total = 0
+        for nums in port_sets:
+            h = len(nums & win)
+            per_total += h
+            if h > max_hit:
+                max_hit = h
+        total_hits += per_total
+        if max_hit >= 3:
+            any3 += 1
+        if max_hit >= 4:
+            any4 += 1
+        if max_hit >= 5:
+            any5 += 1
+
+    overlaps = [len(set(a) & set(b)) for i, a in enumerate(portfolio) for b in portfolio[i + 1:]]
     return {
         "mean_total_hits": total_hits / trials,
         "any3": any3 / trials,
@@ -1885,53 +1943,58 @@ def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
         "union_size": len(set().union(*portfolio)),
         "avg_pair_overlap": _mean(overlaps),
         "max_pair_overlap": max(overlaps) if overlaps else 0,
+        "total_combinations": trials,
+        "method": "mc",
     }
 
 
+def _probe(portfolio, loto, method, trials):
+    """Pick exact vs MC estimator. trials is only used for MC."""
+    if method == "exact":
+        return exact_hitprob(portfolio, loto)
+    return estimate_hitprob(portfolio, loto, trials=trials)
 
-def compare_coverage_vs_hitprob(draws, loto, num_sets=5, trials=100000):
-    """Return an apples-to-apples comparison of legacy coverage vs hitprob mode."""
+
+def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
+    """Apples-to-apples comparison of legacy coverage vs hitprob mode.
+
+    method: "exact" (full enumeration, deterministic) or "mc" (Monte Carlo).
+    trials: ignored when method="exact"; passed to estimate_hitprob otherwise.
+    """
     _, cov_gen, _ = generate_from_draws(
         draws, loto, num_sets=num_sets,
         params_map=MODEL_PARAMS, selection_mode="coverage",
         portfolio_map=PORTFOLIO_PARAMS, ev_mode=False,
     )
-    _, hit_gen, _ = generate_hitprob_from_draws(
-        draws, loto, num_sets=num_sets,
-        params_map=MODEL_PARAMS, portfolio_map=PORTFOLIO_PARAMS,
-    )
+    _, hit_gen, _ = generate_hitprob_from_draws(draws, loto, num_sets=num_sets)
     cov_port = [nums for _, nums in cov_gen.sets]
     hit_port = [nums for _, nums in hit_gen.sets]
     return {
-        "coverage": {
-            "portfolio": cov_port,
-            "estimate": estimate_hitprob(cov_port, loto, trials=trials, seed=0),
-        },
-        "hitprob": {
-            "portfolio": hit_port,
-            "estimate": estimate_hitprob(hit_port, loto, trials=trials, seed=0),
-        },
+        "coverage": {"portfolio": cov_port, "estimate": _probe(cov_port, loto, method, trials)},
+        "hitprob": {"portfolio": hit_port, "estimate": _probe(hit_port, loto, method, trials)},
     }
 
 
+def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
+    """Run hitprob mode and print a coverage-first report.
 
-def run_hitprob(draws, loto, num_sets=5, trials=100000):
+    method: "exact" (default, full enumeration) or "mc".
+    trials: ignored when method="exact"; used by the MC fallback otherwise.
+    """
     if len(draws) < 10:
         print(f"エラー: データ不足（{len(draws)}回）")
         return
 
-    model, gen, selected_metrics = generate_hitprob_from_draws(
-        draws, loto, num_sets=num_sets,
-        params_map=MODEL_PARAMS, portfolio_map=PORTFOLIO_PARAMS,
-    )
+    _, gen, _ = generate_hitprob_from_draws(draws, loto, num_sets=num_sets)
     portfolio = [nums for _, nums in gen.sets]
-    est = estimate_hitprob(portfolio, loto, trials=trials, seed=0)
+    est = _probe(portfolio, loto, method, trials)
 
+    label_method = "exact" if est["method"] == "exact" else "Monte Carlo"
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")
-    print("【戦略】命中率特化（coverage-first / 予測ではなく重複削減）")
+    print("【戦略】命中率特化（coverage-first / 履歴非依存、完全非重複5口）")
     print(f"  ユニーク数: {est['union_size']}  平均組間重複: {est['avg_pair_overlap']:.2f}  最大組間重複: {est['max_pair_overlap']}")
-    print(f"  Monte Carlo推定: 3個以上1本={100*est['any3']:.2f}%  4個以上1本={100*est['any4']:.2f}%  5個以上1本={100*est['any5']:.3f}%")
-    print(f"  参考: 5組合計の期待ヒット数={est['mean_total_hits']:.3f}（これは戦略を変えてもほぼ一定）")
+    print(f"  {label_method}確率: 3個以上1本={100*est['any3']:.2f}%  4個以上1本={100*est['any4']:.2f}%  5個以上1本={100*est['any5']:.3f}%")
+    print(f"  期待ヒット数合計: {est['mean_total_hits']:.3f}（戦略非依存、理論値と一致）")
     print()
 
     print(f"{'組':>2} | {'タイプ':>6} | {'数字':<34} | {'合計':>4} | {'奇:偶':>5}")
