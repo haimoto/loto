@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.5
+ロト6/ロト7 予測スクリプト v5.6
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -8,6 +8,10 @@
 - 改善可能なのは (a) 当選時の配当分配（ev モード）、および
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
+
+v5.6（2026-04-26）の変更:
+- hitprob 生成をランダムサンプル + backtracking から決定論的な完全非重複構築へ変更。
+- exact_hitprob を全組合せ列挙から membership-mask DP に変更し、高速な厳密計算にした。
 
 v5.5（2026-04-26）の変更:
 - CSV スキーマ拡張: ボーナス数字、各等級の口数・賞金額、キャリーオーバーを保持。
@@ -1863,15 +1867,32 @@ def run(draws, loto, num_sets=5, ev_mode=True):
     for _, nums in gen.sets:
         print(" ".join(str(n) for n in nums))
 
-# --- v5.3 命中率特化拡張 ----------------------------------------------------
-# 重要: 期待ヒット数そのものはどの5口でもほぼ同じです。
-# この拡張が改善するのは「5口のうち少なくとも1口が3個以上に届く確率」で、
-# そのために組間重複を強く抑えた coverage-first ポートフォリオを生成します。
+# --- v5.6 命中率特化拡張 ----------------------------------------------------
+# 重要: 期待ヒット数そのものはどの5口でも同じです。
+# この拡張が改善するのは「5口のうち少なくとも1口が3個以上に届く確率」です。
+# v5.6 では、低速なランダムサンプル + backtracking を廃止し、
+# 完全非重複ポートフォリオを決定論的に直接構築します。
+# また exact_hitprob は全組合せ列挙から DP exact に置換し、
+# loto6/loto7 とも高速に厳密確率を返します。
 
 HITPROB_SAMPLES = {
-    "loto6": 30000,
-    "loto7": 40000,
+    "loto6": 0,  # v5.6: 互換用。サンプリングは使わない。
+    "loto7": 0,
 }
+
+
+def _portfolio_nums(portfolio):
+    """Normalize a portfolio representation to a list of sorted tuples."""
+    out = []
+    for item in portfolio:
+        if isinstance(item, dict):
+            nums = item.get("nums")
+        elif isinstance(item, (list, tuple)) and len(item) == 2 and isinstance(item[1], (list, tuple)) and isinstance(item[0], str):
+            nums = item[1]
+        else:
+            nums = item
+        out.append(tuple(sorted(int(n) for n in nums)))
+    return out
 
 
 def _hitprob_band_limits(cfg):
@@ -1882,93 +1903,167 @@ def _hitprob_band_limits(cfg):
     return low_max, mid_max
 
 
-def _enumerate_shape_valid_candidates(cfg, num_samples, seed=0):
-    """Deterministically sample shape-balanced sets with NO history dependency.
+def _band_counts(nums, cfg):
+    low_max, mid_max = _hitprob_band_limits(cfg)
+    return (
+        sum(1 for n in nums if n <= low_max),
+        sum(1 for n in nums if low_max < n <= mid_max),
+        sum(1 for n in nums if n > mid_max),
+    )
 
-    Filters: odd_count within ±1 of target, each of 3 bands present, no 3-consecutive,
-    band imbalance ≤2. Uses a fixed seed — this is a coverage-first tool, not a
-    forecasting one, so the output is identical run-to-run.
+
+def _shape_objective(sets, cfg):
+    """Small aesthetic objective. It does not affect the exact hit probability."""
+    if not sets:
+        return 0.0
+    target_odd = cfg["odd_even_base"][0]
+    sums = [sum(s) for s in sets]
+    mean_sum = sum(sums) / len(sums)
+    score = 0.0
+    for nums, s in zip(sets, sums):
+        odd = sum(1 for n in nums if n % 2 == 1)
+        bands = _band_counts(nums, cfg)
+        score += abs(odd - target_odd) * 20.0
+        score += (s - mean_sum) ** 2 * 0.05
+        score += (max(bands) - min(bands)) * 2.0
+        score += 50.0 if has_triple_consecutive(tuple(sorted(nums))) else 0.0
+    return score
+
+
+def _select_evenly(values, count):
+    """Select count values spread across an already sorted list."""
+    if count <= 0:
+        return []
+    if count > len(values):
+        raise ValueError("選択数が候補数を超えています")
+    if count == len(values):
+        return list(values)
+    if count == 1:
+        return [values[len(values) // 2]]
+
+    # Round-to-nearest can collide on small bands; repair deterministically.
+    raw = [round(i * (len(values) - 1) / (count - 1)) for i in range(count)]
+    used = set()
+    idxs = []
+    for idx in raw:
+        if idx not in used:
+            used.add(idx)
+            idxs.append(idx)
+            continue
+        # Find nearest unused index, preferring the lower side for stability.
+        for delta in range(1, len(values)):
+            left = idx - delta
+            right = idx + delta
+            if left >= 0 and left not in used:
+                used.add(left)
+                idxs.append(left)
+                break
+            if right < len(values) and right not in used:
+                used.add(right)
+                idxs.append(right)
+                break
+    return [values[i] for i in sorted(idxs)]
+
+
+def _balanced_disjoint_portfolio(loto, num_sets=5):
+    """Build mutually disjoint, range-balanced sets directly.
+
+    For a fixed number of tickets, fully disjoint tickets maximize the number of
+    distinct covered numbers. For the default hitprob goal (at least one ticket
+    with >=3 hits), every fully disjoint portfolio with the same set sizes has
+    the same exact probability; this function therefore focuses on speed,
+    reproducibility, and visually balanced ticket shapes.
     """
+    cfg = LOTO_CONFIG[loto]
     lo, hi = cfg["range"]
     pick = cfg["pick"]
     pool = list(range(lo, hi + 1))
-    target_odd = cfg["odd_even_base"][0]
-    low_max, mid_max = _hitprob_band_limits(cfg)
-    rng = random.Random(seed)
+    pool_size = len(pool)
+    if num_sets * pick > pool_size:
+        max_sets = pool_size // pick
+        raise ValueError(
+            f"hitprob は完全非重複を前提とします。num_sets={num_sets}, pick={pick} "
+            f"→ 合計{num_sets * pick}番がプールサイズ{pool_size}を超過。"
+            f"{loto} の最大組数は {max_sets} 組です。"
+        )
 
-    seen = set()
-    candidates = []
-    max_attempts = num_samples * 30
-    attempts = 0
-    while len(candidates) < num_samples and attempts < max_attempts:
-        attempts += 1
-        nums = tuple(sorted(rng.sample(pool, pick)))
-        if nums in seen:
-            continue
-        seen.add(nums)
-        if has_triple_consecutive(nums):
-            continue
-        odd = sum(1 for n in nums if n % 2 == 1)
-        if abs(odd - target_odd) > 1:
-            continue
-        b_low = sum(1 for n in nums if n <= low_max)
-        b_mid = sum(1 for n in nums if low_max < n <= mid_max)
-        b_high = sum(1 for n in nums if n > mid_max)
-        if min(b_low, b_mid, b_high) == 0:
-            continue
-        if max(b_low, b_mid, b_high) - min(b_low, b_mid, b_high) > 2:
-            continue
-        candidates.append({"nums": nums, "odd": odd, "bands": (b_low, b_mid, b_high)})
+    # Split the whole number range into pick bands and take num_sets values
+    # from each band. Each ticket receives exactly one value from every band.
+    bands = []
+    for b in range(pick):
+        a = (b * pool_size) // pick
+        z = ((b + 1) * pool_size) // pick
+        band = pool[a:z]
+        if len(band) < num_sets:
+            raise RuntimeError("内部エラー: バンド幅が不足しています")
+        selected = _select_evenly(band, num_sets)
+        if b % 2:
+            selected = list(reversed(selected))
+        shift = (2 * b) % num_sets
+        bands.append(selected[shift:] + selected[:shift])
 
-    # Stable sort by shape compactness: closer to target_odd first, then balanced bands.
-    candidates.sort(key=lambda c: (
-        abs(c["odd"] - target_odd),
-        max(c["bands"]) - min(c["bands"]),
-        sum(c["nums"]),
-    ))
-    return candidates
+    sets = [[] for _ in range(num_sets)]
+    for b, selected in enumerate(bands):
+        for i, n in enumerate(selected):
+            sets[i].append(n)
+
+    # Deterministic local balancing by swapping numbers inside the same band.
+    # This keeps the portfolio disjoint and keeps one number per band per set.
+    best = [list(s) for s in sets]
+    best_score = _shape_objective(best, cfg)
+    improved = True
+    while improved:
+        improved = False
+        for band_idx in range(pick):
+            for i in range(num_sets):
+                for j in range(i + 1, num_sets):
+                    trial = [list(s) for s in best]
+                    trial[i][band_idx], trial[j][band_idx] = trial[j][band_idx], trial[i][band_idx]
+                    score = _shape_objective(trial, cfg)
+                    if score + 1e-9 < best_score:
+                        best = trial
+                        best_score = score
+                        improved = True
+
+    out = []
+    for nums in best:
+        nums = tuple(sorted(nums))
+        out.append({
+            "nums": nums,
+            "odd": sum(1 for n in nums if n % 2 == 1),
+            "bands": _band_counts(nums, cfg),
+        })
+    return out
+
+
+# Backward-compatible names. They are no longer used by generate_hitprob_from_draws,
+# but keeping them avoids breaking external callers that imported the private helpers.
+def _enumerate_shape_valid_candidates(cfg, num_samples, seed=0):
+    del num_samples, seed
+    loto = _loto_from_range(cfg["range"])
+    return _balanced_disjoint_portfolio(loto, num_sets=5)
 
 
 def _find_disjoint_portfolio(candidates, num_sets, node_budget=2_000_000):
-    """Backtrack to find num_sets mutually-disjoint sets.
-
-    Returns (portfolio, nodes_visited). portfolio is None if not found
-    within node_budget.
-    """
-    nodes = [0]
-    result = [None]
-
-    def backtrack(chosen, used, start):
-        if nodes[0] >= node_budget:
-            return False
-        nodes[0] += 1
+    del node_budget
+    chosen = []
+    used = set()
+    for cand in candidates:
+        nset = set(cand["nums"])
+        if nset & used:
+            continue
+        chosen.append(cand)
+        used |= nset
         if len(chosen) == num_sets:
-            result[0] = list(chosen)
-            return True
-        for i in range(start, len(candidates)):
-            cand = candidates[i]
-            nset = set(cand["nums"])
-            if nset & used:
-                continue
-            chosen.append(cand)
-            if backtrack(chosen, used | nset, i + 1):
-                return True
-            chosen.pop()
-        return False
-
-    backtrack([], set(), 0)
-    return result[0], nodes[0]
+            return chosen, len(chosen)
+    return None, len(candidates)
 
 
 _HITPROB_DEFAULT_LABELS = ("王道A", "王道B", "分散A", "分散B", "逆張り")
 
 
 def _assign_hitprob_labels(portfolio, num_sets):
-    """Assign shape-sorted labels without history dependency.
-
-    Sort by (ascending sum, then ascending odd) so ordering is deterministic
-    and interpretable.
-    """
+    """Assign shape-sorted labels without history dependency."""
     labels = list(_HITPROB_DEFAULT_LABELS[:num_sets])
     indexed = sorted(range(len(portfolio)), key=lambda i: (sum(portfolio[i]["nums"]), portfolio[i]["odd"]))
     out = [None] * len(portfolio)
@@ -1978,104 +2073,133 @@ def _assign_hitprob_labels(portfolio, num_sets):
 
 
 def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfolio_map=None, seed=0):
-    """Coverage-first generator: build a mutually-disjoint shape-balanced portfolio.
+    """Coverage-first generator: build a mutually-disjoint balanced portfolio.
 
-    History-independent. The result depends only on (loto, num_sets, seed).
-    `draws` is accepted for signature compatibility with other generators but
-    is not used.
+    History-independent. The result depends only on (loto, num_sets). `draws`,
+    params_map, portfolio_map, and seed are accepted for signature compatibility.
 
-    Honest caveat: expected total hits is invariant (independent draws). What
-    this changes is the probability that "at least one of the 5 sets has >=3
-    hits" — by reducing inter-set overlap, the portfolio's union is enlarged.
-    For loto6 (5 x 6 = 30 ≤ 43) and loto7 (5 x 7 = 35 ≤ 37), a fully disjoint
-    portfolio is always feasible; this builder returns one.
+    Honest caveat: expected total hits is invariant for independent lottery
+    drawings. This mode increases only the probability that at least one ticket
+    reaches a threshold such as >=3 hits by reducing inter-ticket overlap.
     """
-    del draws, params_map, portfolio_map  # unused — kept for call-site compat
-    cfg = LOTO_CONFIG[loto]
-    pool_size = cfg["range"][1] - cfg["range"][0] + 1
-    # hitprob は完全非重複を前提とするため、num_sets * pick がプールに収まる必要がある。
-    # loto6: pool=43, pick=6 → 最大7組 / loto7: pool=37, pick=7 → 最大5組
-    if num_sets * cfg["pick"] > pool_size:
-        max_sets = pool_size // cfg["pick"]
-        raise ValueError(
-            f"hitprob は完全非重複を前提とします。num_sets={num_sets}, pick={cfg['pick']} "
-            f"→ 合計{num_sets * cfg['pick']}番がプールサイズ{pool_size}を超過。"
-            f"{loto} の最大組数は {max_sets} 組です。"
-        )
-    num_samples = HITPROB_SAMPLES.get(loto, 20000)
-    candidates = _enumerate_shape_valid_candidates(cfg, num_samples=num_samples, seed=seed)
-    if not candidates:
-        raise RuntimeError("命中率特化候補生成失敗")
-    portfolio, nodes = _find_disjoint_portfolio(candidates, num_sets)
-    if portfolio is None:
-        raise RuntimeError(
-            f"完全非重複ポートフォリオ構築失敗（candidates={len(candidates)}, nodes={nodes}）"
-        )
+    del draws, params_map, portfolio_map, seed
+    portfolio = _balanced_disjoint_portfolio(loto, num_sets=num_sets)
     labeled = _assign_hitprob_labels(portfolio, num_sets)
     gen = GenerateResult(labeled, True)
     return None, gen, portfolio
 
 
-def exact_hitprob(portfolio, loto):
-    """Exact portfolio-level hit probabilities via full enumeration.
-
-    loto6: C(43,6) = 6,096,454 combinations.
-    loto7: C(37,7) = 10,295,472 combinations.
-
-    No randomness; results are deterministic and reproducible bit-for-bit.
-    """
+def _validate_portfolio(portfolio, loto):
     cfg = LOTO_CONFIG[loto]
     lo, hi = cfg["range"]
     pick = cfg["pick"]
-    pool = list(range(lo, hi + 1))
-    port_sets = [frozenset(nums) for nums in portfolio]
+    normalized = _portfolio_nums(portfolio)
+    for nums in normalized:
+        if len(nums) != pick:
+            raise ValueError(f"各組は {pick} 個である必要があります: {nums}")
+        if len(set(nums)) != pick:
+            raise ValueError(f"組内に重複があります: {nums}")
+        if any(n < lo or n > hi for n in nums):
+            raise ValueError(f"範囲外の数字があります: {nums}")
+    return normalized
 
-    total = 0
-    any3 = any4 = any5 = 0
-    total_hits_sum = 0
-    for win in combinations(pool, pick):
-        win_set = set(win)
-        total += 1
-        max_hit = 0
-        per_total = 0
-        for nums in port_sets:
-            h = len(nums & win_set)
-            per_total += h
-            if h > max_hit:
-                max_hit = h
-        total_hits_sum += per_total
-        if max_hit >= 3:
-            any3 += 1
-        if max_hit >= 4:
-            any4 += 1
-        if max_hit >= 5:
-            any5 += 1
 
+def _fail_count_under_threshold(portfolio, loto, threshold):
+    """Count winning combinations where every ticket has < threshold hits.
+
+    Generic exact DP over membership masks. This handles both disjoint and
+    overlapping portfolios without enumerating C(N, pick) draws.
+    """
+    from math import comb
+
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    port_sets = [set(nums) for nums in _validate_portfolio(portfolio, loto)]
+    m = len(port_sets)
+    if m == 0:
+        return comb(hi - lo + 1, pick)
+
+    mask_counts = Counter()
+    for n in range(lo, hi + 1):
+        mask = 0
+        for i, nums in enumerate(port_sets):
+            if n in nums:
+                mask |= 1 << i
+        mask_counts[mask] += 1
+
+    # state: (selected_count, hit_tuple) -> number of ways
+    zero_hits = (0,) * m
+    dp = {(0, zero_hits): 1}
+    for mask, count in sorted(mask_counts.items()):
+        new = {}
+        max_take = min(count, pick)
+        affected = [i for i in range(m) if mask & (1 << i)]
+        choices = [comb(count, take) for take in range(max_take + 1)]
+        for (selected, hits), ways in dp.items():
+            remaining = pick - selected
+            for take in range(min(max_take, remaining) + 1):
+                if take == 0:
+                    key = (selected, hits)
+                    new[key] = new.get(key, 0) + ways
+                    continue
+                next_hits = list(hits)
+                ok = True
+                for i in affected:
+                    next_hits[i] += take
+                    if next_hits[i] >= threshold:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                key = (selected + take, tuple(next_hits))
+                new[key] = new.get(key, 0) + ways * choices[take]
+        dp = new
+    return sum(ways for (selected, _hits), ways in dp.items() if selected == pick)
+
+
+def exact_hitprob(portfolio, loto):
+    """Exact portfolio-level hit probabilities via dynamic programming.
+
+    v5.5 enumerated all possible winning combinations. v5.6 instead partitions
+    numbers by the tickets that contain them and runs an exact DP, which is much
+    faster and remains exact even when tickets overlap.
+    """
+    from math import comb
+
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    normalized = _validate_portfolio(portfolio, loto)
+    total = comb(hi - lo + 1, pick)
+
+    any3 = 1 - _fail_count_under_threshold(normalized, loto, 3) / total
+    any4 = 1 - _fail_count_under_threshold(normalized, loto, 4) / total
+    any5 = 1 - _fail_count_under_threshold(normalized, loto, 5) / total
+
+    port_sets = [set(nums) for nums in normalized]
     overlaps = [len(a & b) for i, a in enumerate(port_sets) for b in port_sets[i + 1:]]
+    total_ticket_numbers = sum(len(s) for s in port_sets)
     return {
-        "mean_total_hits": total_hits_sum / total,
-        "any3": any3 / total,
-        "any4": any4 / total,
-        "any5": any5 / total,
-        "union_size": len(set().union(*portfolio)),
+        "mean_total_hits": total_ticket_numbers * pick / (hi - lo + 1),
+        "any3": any3,
+        "any4": any4,
+        "any5": any5,
+        "union_size": len(set().union(*normalized)) if normalized else 0,
         "avg_pair_overlap": _mean(overlaps),
         "max_pair_overlap": max(overlaps) if overlaps else 0,
         "total_combinations": total,
-        "method": "exact",
+        "method": "exact-dp",
     }
 
 
 def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
-    """Monte Carlo estimator. Kept for back-compat; prefer `exact_hitprob`.
-
-    Returns the same keys as `exact_hitprob` (with `method="mc"`) so callers
-    can be swapped without conditional logic.
-    """
+    """Monte Carlo estimator. Kept for back-compat; prefer exact_hitprob."""
     cfg = LOTO_CONFIG[loto]
     lo, hi = cfg["range"]
     pick = cfg["pick"]
     pool = list(range(lo, hi + 1))
-    port_sets = [set(nums) for nums in portfolio]
+    port_sets = [set(nums) for nums in _validate_portfolio(portfolio, loto)]
     rng = random.Random(seed)
 
     any3 = any4 = any5 = 0
@@ -2097,13 +2221,13 @@ def estimate_hitprob(portfolio, loto, trials=100000, seed=0):
         if max_hit >= 5:
             any5 += 1
 
-    overlaps = [len(set(a) & set(b)) for i, a in enumerate(portfolio) for b in portfolio[i + 1:]]
+    overlaps = [len(a & b) for i, a in enumerate(port_sets) for b in port_sets[i + 1:]]
     return {
         "mean_total_hits": total_hits / trials,
         "any3": any3 / trials,
         "any4": any4 / trials,
         "any5": any5 / trials,
-        "union_size": len(set().union(*portfolio)),
+        "union_size": len(set().union(*port_sets)) if port_sets else 0,
         "avg_pair_overlap": _mean(overlaps),
         "max_pair_overlap": max(overlaps) if overlaps else 0,
         "total_combinations": trials,
@@ -2119,11 +2243,7 @@ def _probe(portfolio, loto, method, trials):
 
 
 def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
-    """Apples-to-apples comparison of legacy coverage vs hitprob mode.
-
-    method: "exact" (full enumeration, deterministic) or "mc" (Monte Carlo).
-    trials: ignored when method="exact"; passed to estimate_hitprob otherwise.
-    """
+    """Apples-to-apples comparison of legacy coverage vs hitprob mode."""
     _, cov_gen, _ = generate_from_draws(
         draws, loto, num_sets=num_sets,
         params_map=MODEL_PARAMS, selection_mode="coverage",
@@ -2139,11 +2259,7 @@ def compare_coverage_vs_hitprob(draws, loto, num_sets=5, method="exact", trials=
 
 
 def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
-    """Run hitprob mode and print a coverage-first report.
-
-    method: "exact" (default, full enumeration) or "mc".
-    trials: ignored when method="exact"; used by the MC fallback otherwise.
-    """
+    """Run hitprob mode and print a coverage-first report."""
     if len(draws) < 10:
         print(f"エラー: データ不足（{len(draws)}回）")
         return
@@ -2152,9 +2268,9 @@ def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     portfolio = [nums for _, nums in gen.sets]
     est = _probe(portfolio, loto, method, trials)
 
-    label_method = "exact" if est["method"] == "exact" else "Monte Carlo"
+    label_method = "exact DP" if est["method"] == "exact-dp" else "Monte Carlo"
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")
-    print("【戦略】命中率特化（coverage-first / 履歴非依存、完全非重複5口）")
+    print("【戦略】命中率特化（coverage-first / 履歴非依存、完全非重複ポートフォリオ）")
     print(f"  ユニーク数: {est['union_size']}  平均組間重複: {est['avg_pair_overlap']:.2f}  最大組間重複: {est['max_pair_overlap']}")
     print(f"  {label_method}確率: 3個以上1本={100*est['any3']:.2f}%  4個以上1本={100*est['any4']:.2f}%  5個以上1本={100*est['any5']:.3f}%")
     print(f"  期待ヒット数合計: {est['mean_total_hits']:.3f}（戦略非依存、理論値と一致）")
@@ -2171,7 +2287,6 @@ def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     print("【数字のみ（コピー用）】")
     for nums in portfolio:
         print(" ".join(str(n) for n in nums))
-
 
 if __name__ == "__main__":
     loto = _sys.argv[1] if len(_sys.argv) > 1 else "loto6"

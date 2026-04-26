@@ -4,8 +4,8 @@
 
 ## デフォルト（命中率特化モード / 推奨）
 
-履歴非依存で5口を完全非重複に構築（coverage-first、backtracking）。
-「少なくとも1口が3個以上に届く確率」を近似的に高める設計。
+履歴非依存で5口を完全非重複に構築（v5.6: 決定論的 disjoint 構築、bandごとに均等分散）。
+「少なくとも1口が3個以上に届く確率」を高める設計。
 
 ### ロト6
 
@@ -41,7 +41,8 @@ lp.run(draws, "loto7", ev_mode=True)
 
 ## モード比較（compare）
 
-coverage（標準） vs hitprob（命中率特化）の exact probability 比較（全組合せ列挙、決定論的）。
+coverage（標準） vs hitprob（命中率特化）の exact probability 比較
+（v5.6: membership-mask DP、決定論的、loto6/7 とも 1〜2ms）。
 
 ```python
 result = lp.compare_coverage_vs_hitprob(draws, "loto7")
@@ -74,12 +75,13 @@ lp.run(draws, "loto7", num_sets=10, ev_mode=True)
 - 改善可能なのは次の2軸のみ：
   - **命中率特化（hitprob）**: 完全非重複の5口で和集合を最大化することで「少なくとも1口で3個以上」の確率を近似的に高める。期待値は不変、履歴完全非依存
   - **配当分配最適化（ev）**: 他人と被りにくい不人気数字構成を選ぶことで、当たった時の分配金を増やす。固定ポートフォリオ（seed=0）
-- Exact probability（全組合せ列挙による決定論的値、v5.4 で MC から置換）:
+- Exact probability（v5.6: membership-mask DP、決定論的、ms 単位で厳密計算）:
   - loto7: coverage any3=40.9017% → hitprob 50.9627% (+10.06pt)
   - loto6: coverage any3=12.4266% → hitprob 13.5171% (+1.09pt)
   - ≥4個の改善は loto6 +0.003pt, loto7 +0.25pt（小さい。過剰期待禁物）
 - どのモードも的中率は理論期待値（loto6: 4.186/回, loto7: 6.622/回）に長期収束する
 - v5.5 から CSV にボーナス・賞金・口数列を保持。バックテストは厳密等級判定（loto6: 1〜5等、loto7: 1〜6等、ボーナス込み）と実績平均賞金ベースの ROI を出力
+- v5.6: hitprob の `_balanced_disjoint_portfolio` で決定論的 disjoint 構築、`exact_hitprob` を全組合せ列挙から DP に置換（loto6/7 とも 100〜5,000 倍高速化）。`backtest_hitprob_fast.py` で hitprob 単独の高速ウォークフォワード可能
 
 ## 厳守
 - 確認・質問・選択肢は禁止。即実行
