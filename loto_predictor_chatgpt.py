@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.4
+ロト6/ロト7 予測スクリプト v5.5
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -8,6 +8,18 @@
 - 改善可能なのは (a) 当選時の配当分配（ev モード）、および
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
+
+v5.5（2026-04-26）の変更:
+- CSV スキーマ拡張: ボーナス数字、各等級の口数・賞金額、キャリーオーバーを保持。
+  loto6: 1893-2096 / loto7: 474-674 の全範囲をthekyo.jpの実績データで再生成。
+- Draw データクラスに bonus / prize_counts / prize_yen / carry を追加。
+  parse_csv は新旧両スキーマ互換（旧形式は本数字のみ、空のまま）。
+- classify_prize / average_prize_yen / calc_popularity_scores を追加:
+  loto6 1〜5等、loto7 1〜6等の厳密判定（ボーナス込み）と実績平均賞金算出。
+- backtest.py: 等級別内訳と実績平均賞金ベースの ROI を表示。「本数字3個以上」
+  の中立表記を等級内訳に置換（v5.4 の暫定回避策を解消）。
+- _ev_unpopularity に popularity_scores 引数追加（オプション）。新CSVでは
+  _build_model 経由で過去5等口数ベースの実測人気度を ev mode に自動投入。
 
 v5.4（2026-04-19 Codex レビュー対応）の変更:
 - hitprob を真の最適化へ: ランダムサンプル + greedy の近似を、履歴非依存の
@@ -68,6 +80,8 @@ LOTO_CONFIG = {
     "loto6": {
         "range": (1, 43),
         "pick": 6,
+        "bonus_count": 1,
+        "tiers": 5,
         "odd_even_base": (3, 3),
         "small_max": 21,
         "sum_mid": (120, 160),
@@ -79,6 +93,8 @@ LOTO_CONFIG = {
     "loto7": {
         "range": (1, 37),
         "pick": 7,
+        "bonus_count": 2,
+        "tiers": 6,
         "odd_even_base": (4, 3),
         "small_max": 18,
         "sum_mid": (125, 155),
@@ -361,6 +377,10 @@ class Draw:
     number: int
     date: str
     main: tuple[int, ...]
+    bonus: tuple[int, ...] = ()           # loto6: 1要素 / loto7: 2要素 / 旧CSV: 空
+    prize_counts: tuple[int, ...] = ()    # 1〜N等口数（loto6: 5要素, loto7: 6要素）
+    prize_yen: tuple[int, ...] = ()       # 1〜N等賞金額
+    carry: int = 0                        # キャリーオーバー金額
 
 
 @dataclass
@@ -378,14 +398,22 @@ class GenerateResult:
 # -- CSV パーサー --
 
 def parse_csv(text: str, loto: str) -> list[Draw]:
-    """Parse draw CSV. Reads only the first `pick` numeric columns after
-    (draw_number, date) so trailing bonus columns are ignored cleanly.
+    """Parse draw CSV.
+
+    新スキーマ（v5.5）:
+      回号,抽選日,n1..n{pick},bonus1..bonus{bonus_count},
+      p1_cnt..pT_cnt,p1_yen..pT_yen,carry
+    旧スキーマ（〜v5.4）:
+      回号,抽選日,n1..n{pick}
+    どちらも読み込み可能。bonus/賞金/口数列がなければ空のまま。
 
     Validates: exact pick count, no duplicates, all numbers within range.
     Invalid rows are silently skipped.
     """
     cfg = LOTO_CONFIG[loto]
     pick = cfg["pick"]
+    bonus_count = cfg.get("bonus_count", 0)
+    tiers = cfg.get("tiers", 0)
     lo, hi = cfg["range"]
     draws = []
     for line in text.strip().splitlines():
@@ -416,7 +444,42 @@ def parse_csv(text: str, loto: str) -> list[Draw]:
             continue
         if len(set(numbers)) != pick:
             continue
-        draws.append(Draw(draw_num, draw_date, tuple(sorted(numbers))))
+        # ボーナス列（オプション、欠損なら空）
+        bonus: tuple[int, ...] = ()
+        bonus_end = 2 + pick + bonus_count
+        if bonus_count and len(parts) >= bonus_end:
+            try:
+                bvals = []
+                for tok in parts[2 + pick:bonus_end]:
+                    n = int(tok.strip().strip("()"))
+                    if not (lo <= n <= hi):
+                        raise ValueError
+                    bvals.append(n)
+                bonus = tuple(sorted(bvals))
+            except (ValueError, AttributeError):
+                bonus = ()
+        # 賞金口数・金額（オプション）
+        prize_counts: tuple[int, ...] = ()
+        prize_yen: tuple[int, ...] = ()
+        carry = 0
+        prize_end = bonus_end + tiers * 2
+        if tiers and len(parts) >= prize_end:
+            try:
+                pc = tuple(int(parts[bonus_end + i]) for i in range(tiers))
+                py = tuple(int(parts[bonus_end + tiers + i]) for i in range(tiers))
+                prize_counts, prize_yen = pc, py
+            except (ValueError, IndexError):
+                pass
+            if len(parts) > prize_end:
+                try:
+                    carry = int(parts[prize_end])
+                except (ValueError, IndexError):
+                    carry = 0
+        draws.append(Draw(
+            draw_num, draw_date, tuple(sorted(numbers)),
+            bonus=bonus, prize_counts=prize_counts,
+            prize_yen=prize_yen, carry=carry,
+        ))
     draws.sort(key=lambda d: d.number, reverse=True)
     seen = set()
     unique = []
@@ -425,6 +488,94 @@ def parse_csv(text: str, loto: str) -> list[Draw]:
             seen.add(d.number)
             unique.append(d)
     return unique[:LOOKBACK]
+
+
+# -- 等級判定 / 賞金実績 --
+
+def classify_prize(picked, draw: "Draw", loto: str):
+    """1セットの予測 picked を draw と照合し、当選等級番号を返す。
+    入賞なしは None。draw.bonus が空（旧CSV）でも、ボーナス無し前提で
+    判定可能な等級（loto6: 1/3/4/5、loto7: 1/3/4/5）は返す。
+    """
+    main_set = set(draw.main)
+    bonus_set = set(draw.bonus)
+    p = set(picked)
+    main_hits = len(p & main_set)
+    bonus_hits = len(p & bonus_set)
+    if loto == "loto6":
+        if main_hits == 6:
+            return 1
+        if main_hits == 5 and bonus_hits >= 1:
+            return 2
+        if main_hits == 5:
+            return 3
+        if main_hits == 4:
+            return 4
+        if main_hits == 3:
+            return 5
+        return None
+    if loto == "loto7":
+        if main_hits == 7:
+            return 1
+        if main_hits == 6 and bonus_hits >= 1:
+            return 2
+        if main_hits == 6:
+            return 3
+        if main_hits == 5:
+            return 4
+        if main_hits == 4:
+            return 5
+        if main_hits == 3 and bonus_hits >= 1:
+            return 6
+        return None
+    raise ValueError(f"unknown loto: {loto}")
+
+
+def calc_popularity_scores(draws: list["Draw"], loto: str) -> dict[int, float]:
+    """過去口数から各数字の人気度（1.0=平均、>1=人気、<1=不人気）。
+    5等口数（最も人数が多い等級）のデータがある回のみ使用。
+    数字 i の人気度 = (i が含まれた回の5等平均口数) / (全回の5等平均口数)
+    データ不足や全回ゼロ口数（該当なし）の場合は空 dict（フォールバック想定）。
+    """
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    overall = []
+    per_num: dict[int, list[int]] = {n: [] for n in range(lo, hi + 1)}
+    for d in draws:
+        if not d.prize_counts or len(d.prize_counts) < 5:
+            continue
+        c5 = d.prize_counts[4]  # 5等は loto6/7 とも index 4
+        if c5 <= 0:
+            continue
+        overall.append(c5)
+        for n in d.main:
+            per_num[n].append(c5)
+    if not overall:
+        return {}
+    base = sum(overall) / len(overall)
+    return {n: (sum(v) / len(v) / base) if v else 1.0 for n, v in per_num.items()}
+
+
+def average_prize_yen(draws: list["Draw"], loto: str) -> dict[int, float]:
+    """過去 draws から各等級の実績平均賞金額を算出（該当なし回は除外）。
+    キー = 等級番号（1..tiers）、値 = 平均円。データ欠損時は空 dict。
+    """
+    cfg = LOTO_CONFIG[loto]
+    tiers = cfg.get("tiers", 0)
+    if not tiers:
+        return {}
+    per_tier: dict[int, list[int]] = {t: [] for t in range(1, tiers + 1)}
+    for d in draws:
+        if not d.prize_yen or len(d.prize_yen) < tiers:
+            continue
+        if not d.prize_counts or len(d.prize_counts) < tiers:
+            continue
+        for t in range(1, tiers + 1):
+            cnt = d.prize_counts[t - 1]
+            yen = d.prize_yen[t - 1]
+            if cnt > 0 and yen > 0:
+                per_tier[t].append(yen)
+    return {t: (sum(v) / len(v)) if v else 0.0 for t, v in per_tier.items()}
 
 
 # -- 汎用ヘルパー --
@@ -521,10 +672,12 @@ def _zbin(value, mean, sd):
     return 2
 
 
-def _ev_unpopularity(nums, cfg):
+def _ev_unpopularity(nums, cfg, popularity_scores=None):
     # Humans systematically over-pick calendar dates (1-31), months (1-12), lucky digits,
     # and patterned sequences. Combinations that avoid those shapes share the jackpot
     # with fewer winners, so a higher score here means a larger payout when it hits.
+    # popularity_scores: 過去5等口数ベースの実測人気度（calc_popularity_scoresの結果）。
+    #   提供されれば形状ヒューリスティクスに加えて、不人気数字を選んだ分のボーナス。
     lo, hi = cfg["range"]
     n_pick = len(nums)
     # high_threshold is range-dependent: loto6=>31 (12 high nums), loto7=>25 (12 high nums).
@@ -576,6 +729,12 @@ def _ev_unpopularity(nums, cfg):
 
     if hi in nums:
         score += 0.3
+
+    # 実測人気度ボーナス（v5.5）: 過去口数から導出した「不人気数字」を含む分だけ加算。
+    # 形状ヒューリスティクス（カレンダー/語呂/連番）と独立した、購入者バイアスの実測指標。
+    if popularity_scores:
+        unpop_bonus = sum(max(0.0, 1.0 - popularity_scores.get(n, 1.0)) for n in nums)
+        score += unpop_bonus * cfg.get("unpopular_weight", 1.5)
 
     return score
 
@@ -761,6 +920,9 @@ def _build_model(draws, loto, params_map=None, selection_mode="coverage", portfo
         "params_map": params_map,
         "portfolio_map": portfolio_map,
         "selection_mode": selection_mode,
+        # v5.5: 過去口数ベースの人気度。新CSV（賞金列あり）使用時のみ非空。
+        # ev mode の _ev_unpopularity に渡されて、形状ヒューリと併用される。
+        "popularity_scores": calc_popularity_scores(hist, loto),
     }
     _LAST_MODEL_CACHE[cache_key] = model
     return model
@@ -1509,6 +1671,7 @@ def _enumerate_ev_candidates(model, loto, num_samples=15000, seed=0):
     pick = cfg["pick"]
     rng = random.Random(seed)
     pool = list(range(lo, hi + 1))
+    pop_scores = model.get("popularity_scores") or None
 
     seen = set()
     candidates = []
@@ -1526,7 +1689,7 @@ def _enumerate_ev_candidates(model, loto, num_samples=15000, seed=0):
         if has_triple_consecutive(nums):
             continue
         metrics = _candidate_metrics(nums, model, loto)
-        ev = _ev_unpopularity(nums, cfg)
+        ev = _ev_unpopularity(nums, cfg, pop_scores)
         metrics["ev_score"] = ev
         metrics["score"] = ev
         candidates.append(metrics)

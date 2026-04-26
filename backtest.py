@@ -4,6 +4,9 @@ For each of the most recent N draws, predict using only the history that was
 available before that draw, then compare against the actual winning numbers.
 Compares strategies: normal, EV, greedy, relaxed, hitprob, and a random baseline.
 
+v5.5: 等級判定を厳密化（loto6: 1〜5等、loto7: 1〜6等。ボーナス込み）。
+      賞金期待値を全期間の実績平均ベースで算出。
+
 Usage:
     python3 backtest.py                # loto6, 50 rounds
     python3 backtest.py loto6 80       # loto6, 80 rounds
@@ -30,21 +33,23 @@ def _rand_sets(cfg, num_sets, rng):
     return out
 
 
-def _rand_baseline_hits(cfg, num_sets, winning, rngs):
+def _rand_baseline_hits(cfg, num_sets, draw, loto, rngs):
     # Average across multiple seeds so the baseline converges toward the
     # theoretical expectation rather than riding a single lucky draw.
     per_set_avg = []
     totals = []
     raw_sets = []
+    raw_tiers = []
     for rng in rngs:
         sets = _rand_sets(cfg, num_sets, rng)
-        h = _hits(sets, winning)
+        h, t = _hits_and_tiers(sets, draw, loto)
         per_set_avg.append(h)
         totals.append(sum(h))
         raw_sets.extend(sets)
+        raw_tiers.extend(t)
     flat_per_set = [x for sub in per_set_avg for x in sub]
     avg_total = sum(totals) / len(totals)
-    return avg_total, flat_per_set, raw_sets
+    return avg_total, flat_per_set, raw_sets, raw_tiers
 
 
 def _predict_normal(history, loto, num_sets):
@@ -108,21 +113,49 @@ def _hits(sets, winning):
     return [len(set(s) & w) for s in sets]
 
 
-def _summary(label, per_round_total, per_set_hits, cfg, ev_proxy=None):
+def _hits_and_tiers(sets, draw, loto):
+    w = set(draw.main)
+    hits = []
+    tiers = []
+    for s in sets:
+        hits.append(len(set(s) & w))
+        tiers.append(lp.classify_prize(s, draw, loto))
+    return hits, tiers
+
+
+def _summary(label, per_round_total, per_set_hits, per_set_tiers, cfg,
+             prize_avg, loto, ev_proxy=None):
     n = len(per_round_total)
     avg_total = statistics.mean(per_round_total)
     med_total = statistics.median(per_round_total)
     avg_per_set = statistics.mean(per_set_hits)
     hit_counter = Counter(per_set_hits)
-    ge3_sets = sum(hit_counter.get(k, 0) for k in (3, 4, 5, 6, 7))
     print(f"[{label}]")
     print(f"  平均ヒット/回: {avg_total:.2f}  中央値: {med_total:.1f}  試行: {n}回 × 5組 = {len(per_set_hits)}組")
     print(f"  平均ヒット/組: {avg_per_set:.3f}")
     hist_parts = [f"{k}個:{hit_counter.get(k, 0)}" for k in range(0, 8) if hit_counter.get(k, 0)]
     print(f"  分布: {'  '.join(hist_parts)}")
-    # Loto6: 本数字3個で5等入賞。Loto7: 本数字3個はボーナス次第で6等、ボーナス無しCSVでは判定不可。
-    # 誤誘導を避け、ここでは単に「本数字3個以上」と表記する。
-    print(f"  本数字3個以上: {ge3_sets}組 / {len(per_set_hits)}組 ({100*ge3_sets/len(per_set_hits):.2f}%)")
+    # 等級別カウント（厳密判定: loto6=2等はボーナス1致、loto7=2/6等はボーナス1or2）
+    tier_counter = Counter(t for t in per_set_tiers if t is not None)
+    tiers = cfg.get("tiers", 5)
+    tier_parts = []
+    for t in range(1, tiers + 1):
+        c = tier_counter.get(t, 0)
+        if c:
+            tier_parts.append(f"{t}等:{c}")
+    win_total = sum(tier_counter.values())
+    print(f"  等級内訳: {'  '.join(tier_parts) if tier_parts else '入賞なし'}  "
+          f"(入賞 {win_total}組, {100*win_total/len(per_set_hits):.2f}%)")
+    # 賞金期待値（実績平均 × 各等級の的中口数）
+    if prize_avg:
+        total_yen = sum(prize_avg.get(t, 0) * tier_counter.get(t, 0) for t in range(1, tiers + 1))
+        per_round_yen = total_yen / n if n else 0
+        per_set_yen = total_yen / len(per_set_hits) if per_set_hits else 0
+        cost = 200 if loto == "loto6" else 300
+        roi = per_set_yen / cost - 1 if cost else 0
+        print(f"  賞金合計(実績平均): {total_yen:>15,.0f}円  "
+              f"1回平均: {per_round_yen:>11,.0f}円  "
+              f"1組平均: {per_set_yen:>9,.0f}円  ROI: {roi:+.1%}")
     if ev_proxy:
         ht = cfg.get("high_threshold", 31)
         print(f"  EV不人気スコア平均: {ev_proxy['ev_avg']:.2f}  "
@@ -184,13 +217,19 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
         rounds = available
 
     base_rng = random.Random(seed)
+    prize_avg = lp.average_prize_yen(all_draws, loto)
     print(f"\n=== walk-forward backtest [{loto}] ===")
     print(f"対象: 直近{rounds}回  学習履歴: 各ターゲット以前の全データ（最大{lp.LOOKBACK}回）")
-    print(f"ランダムベースライン: {random_seeds}シード平均\n")
+    print(f"ランダムベースライン: {random_seeds}シード平均")
+    if prize_avg:
+        ptxt = "  ".join(f"{t}等={y:,.0f}円" for t, y in prize_avg.items())
+        print(f"等級別実績平均賞金: {ptxt}")
+    print()
 
     modes = ["normal", "ev", "greedy", "relaxed", "hitprob", "random"]
     totals = {m: [] for m in modes}
     per_set = {m: [] for m in modes}
+    per_tier = {m: [] for m in modes}
     all_sets = {m: [] for m in modes}
     any3_rounds = {m: 0 for m in modes}
     start = time.time()
@@ -202,7 +241,9 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
             break
 
         rngs = [random.Random(base_rng.randrange(2**31)) for _ in range(random_seeds)]
-        rand_total, rand_flat, rand_raw = _rand_baseline_hits(cfg, num_sets, target.main, rngs)
+        rand_total, rand_flat, rand_raw, rand_tiers = _rand_baseline_hits(
+            cfg, num_sets, target, loto, rngs
+        )
         results = {
             "normal": _predict_normal(history, loto, num_sets),
             "ev": _predict_ev(history, loto, num_sets),
@@ -211,14 +252,16 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
             "hitprob": _predict_hitprob(history, loto, num_sets),
         }
         for m in ("normal", "ev", "greedy", "relaxed", "hitprob"):
-            hits = _hits(results[m], target.main)
+            hits, tiers = _hits_and_tiers(results[m], target, loto)
             totals[m].append(sum(hits))
             per_set[m].extend(hits)
+            per_tier[m].extend(tiers)
             all_sets[m].extend(results[m])
             if any(h >= 3 for h in hits):
                 any3_rounds[m] += 1
         totals["random"].append(rand_total)
         per_set["random"].extend(rand_flat)
+        per_tier["random"].extend(rand_tiers)
         all_sets["random"].extend(rand_raw)
         # For the random baseline, count any3 across the averaged seeds.
         # rand_flat has random_seeds * num_sets entries; chunk per seed to match.
@@ -238,7 +281,8 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
               "relaxed": "制約緩和", "hitprob": "命中率特化", "random": "ランダム"}
     for m in modes:
         proxy = _ev_proxy(all_sets[m], cfg)
-        _summary(labels[m], totals[m], per_set[m], cfg, ev_proxy=proxy)
+        _summary(labels[m], totals[m], per_set[m], per_tier[m], cfg,
+                 prize_avg, loto, ev_proxy=proxy)
         print()
 
     expected = cfg["pick"] * cfg["pick"] / (cfg["range"][1] - cfg["range"][0] + 1) * num_sets
