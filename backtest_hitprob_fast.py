@@ -3,6 +3,7 @@
 Usage:
     python3 backtest_hitprob_fast.py loto6 80
     python3 backtest_hitprob_fast.py loto7 80
+    python3 backtest_hitprob_fast.py loto6 80 --num-sets max
 
 This script intentionally tests the strategy that can improve portfolio-level
 hit probability: fully disjoint hitprob mode. It avoids the slower historical
@@ -11,13 +12,34 @@ heuristic modes from the legacy backtest.
 
 from __future__ import annotations
 
+import argparse
 import random
 import statistics
-import sys
 from collections import Counter
 from pathlib import Path
 
 import loto_predictor_chatgpt as lp
+
+
+def _max_disjoint_sets(loto):
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    return (hi - lo + 1) // cfg["pick"]
+
+
+def _parse_num_sets(value, loto):
+    max_sets = _max_disjoint_sets(loto)
+    if str(value).lower() == "max":
+        return max_sets
+    try:
+        num_sets = int(value)
+    except ValueError as exc:
+        raise SystemExit("--num-sets は整数または max を指定してください") from exc
+    if num_sets < 1:
+        raise SystemExit("--num-sets は1以上を指定してください")
+    if num_sets > max_sets:
+        raise SystemExit(f"{loto} の hitprob 完全非重複上限は {max_sets} 組です")
+    return num_sets
 
 
 def _rand_sets(cfg, num_sets, rng):
@@ -59,6 +81,8 @@ def backtest(loto="loto6", rounds=80, min_history=50, seed=42, random_seeds=200,
     csv_path = Path(f"{loto}_data.csv")
     draws = lp.parse_csv(csv_path.read_text(), loto)
     cfg = lp.LOTO_CONFIG[loto]
+    if num_sets < 1:
+        raise SystemExit("num_sets は1以上を指定してください")
     available = min(rounds, len(draws) - min_history)
     if available < 1:
         raise SystemExit(f"データ不足: {len(draws)}回")
@@ -116,7 +140,15 @@ def backtest(loto="loto6", rounds=80, min_history=50, seed=42, random_seeds=200,
 
 
 if __name__ == "__main__":
-    loto = sys.argv[1] if len(sys.argv) > 1 else "loto6"
-    rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 80
-    min_history = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-    backtest(loto=loto, rounds=rounds, min_history=min_history)
+    parser = argparse.ArgumentParser(description="Fast hitprob backtest.")
+    parser.add_argument("loto", nargs="?", choices=sorted(lp.LOTO_CONFIG), default="loto6")
+    parser.add_argument("rounds", nargs="?", type=int, default=80)
+    parser.add_argument("min_history", nargs="?", type=int, default=50)
+    parser.add_argument(
+        "--num-sets",
+        default="5",
+        help="購入組数。整数または max（loto6=7, loto7=5）。デフォルトは5。",
+    )
+    args = parser.parse_args()
+    num_sets = _parse_num_sets(args.num_sets, args.loto)
+    backtest(loto=args.loto, rounds=args.rounds, min_history=args.min_history, num_sets=num_sets)

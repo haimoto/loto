@@ -69,6 +69,13 @@ lp.run(draws, "loto7", num_sets=10)
 lp.run(draws, "loto7", num_sets=10, ev_mode=True)
 ```
 
+バックテストで hitprob の最大非重複ポートフォリオを検証する場合:
+
+```bash
+python3 backtest_hitprob_fast.py loto6 80 --num-sets max
+python3 backtest_hitprob_fast.py loto7 80 --num-sets max
+```
+
 ## 設計方針（前提）
 
 - ロト6/7 は独立抽選。過去データから **5口合計の期待ヒット数を上げることは数学的に不可能**
