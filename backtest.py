@@ -11,14 +11,15 @@ Usage:
     python3 backtest.py                # loto6, 50 rounds
     python3 backtest.py loto6 80       # loto6, 80 rounds
     python3 backtest.py loto7 30       # loto7, 30 rounds
+    python3 backtest.py loto6 80 --num-sets 7
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import random
 import statistics
-import sys
 import time
 from collections import Counter
 
@@ -124,14 +125,17 @@ def _hits_and_tiers(sets, draw, loto):
 
 
 def _summary(label, per_round_total, per_set_hits, per_set_tiers, cfg,
-             prize_avg, loto, ev_proxy=None):
+             prize_avg, loto, ev_proxy=None, num_sets=None, random_seeds=1):
     n = len(per_round_total)
     avg_total = statistics.mean(per_round_total)
     med_total = statistics.median(per_round_total)
     avg_per_set = statistics.mean(per_set_hits)
     hit_counter = Counter(per_set_hits)
+    if num_sets is None:
+        num_sets = int(len(per_set_hits) / n) if n else 0
+    seed_label = f" × {random_seeds}シード" if random_seeds > 1 else ""
     print(f"[{label}]")
-    print(f"  平均ヒット/回: {avg_total:.2f}  中央値: {med_total:.1f}  試行: {n}回 × 5組 = {len(per_set_hits)}組")
+    print(f"  平均ヒット/回: {avg_total:.2f}  中央値: {med_total:.1f}  評価: {n}回 × {num_sets}組{seed_label} = {len(per_set_hits)}組")
     print(f"  平均ヒット/組: {avg_per_set:.3f}")
     hist_parts = [f"{k}個:{hit_counter.get(k, 0)}" for k in range(0, 8) if hit_counter.get(k, 0)]
     print(f"  分布: {'  '.join(hist_parts)}")
@@ -200,12 +204,13 @@ def _paired_sign_test(a, b):
     return wins, losses, ties, p
 
 
-def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
+def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20, num_sets=5):
     csv_path = f"{loto}_data.csv"
     with open(csv_path) as f:
         all_draws = lp.parse_csv(f.read(), loto)
     cfg = lp.LOTO_CONFIG[loto]
-    num_sets = 5
+    if num_sets < 1:
+        raise SystemExit("num_sets は1以上を指定してください")
 
     if len(all_draws) < min_history + 1:
         print(f"データ不足: {len(all_draws)}回（最低{min_history + 1}回必要）")
@@ -219,7 +224,7 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
     base_rng = random.Random(seed)
     prize_avg = lp.average_prize_yen(all_draws, loto)
     print(f"\n=== walk-forward backtest [{loto}] ===")
-    print(f"対象: 直近{rounds}回  学習履歴: 各ターゲット以前の全データ（最大{lp.LOOKBACK}回）")
+    print(f"対象: 直近{rounds}回  組数: {num_sets}  学習履歴: 各ターゲット以前の全データ（最大{lp.LOOKBACK}回）")
     print(f"ランダムベースライン: {random_seeds}シード平均")
     if prize_avg:
         ptxt = "  ".join(f"{t}等={y:,.0f}円" for t, y in prize_avg.items())
@@ -282,11 +287,12 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
     for m in modes:
         proxy = _ev_proxy(all_sets[m], cfg)
         _summary(labels[m], totals[m], per_set[m], per_tier[m], cfg,
-                 prize_avg, loto, ev_proxy=proxy)
+                 prize_avg, loto, ev_proxy=proxy, num_sets=num_sets,
+                 random_seeds=random_seeds if m == "random" else 1)
         print()
 
     expected = cfg["pick"] * cfg["pick"] / (cfg["range"][1] - cfg["range"][0] + 1) * num_sets
-    print(f"理論期待値: 5組合計 {expected:.2f}個/回  (1組あたり {expected/num_sets:.3f}個)")
+    print(f"理論期待値: {num_sets}組合計 {expected:.2f}個/回  (1組あたり {expected/num_sets:.3f}個)")
     print()
 
     print("【≥3個を1口以上含む回の割合（hitprob モードの設計目標）】")
@@ -307,7 +313,10 @@ def backtest(loto="loto6", rounds=50, min_history=50, seed=42, random_seeds=20):
 
 
 if __name__ == "__main__":
-    loto = sys.argv[1] if len(sys.argv) > 1 else "loto6"
-    rounds = int(sys.argv[2]) if len(sys.argv) > 2 else 50
-    min_hist = int(sys.argv[3]) if len(sys.argv) > 3 else 50
-    backtest(loto=loto, rounds=rounds, min_history=min_hist)
+    parser = argparse.ArgumentParser(description="Walk-forward backtest for loto strategies.")
+    parser.add_argument("loto", nargs="?", choices=sorted(lp.LOTO_CONFIG), default="loto6")
+    parser.add_argument("rounds", nargs="?", type=int, default=50)
+    parser.add_argument("min_history", nargs="?", type=int, default=50)
+    parser.add_argument("--num-sets", type=int, default=5, help="購入組数。デフォルトは5。")
+    args = parser.parse_args()
+    backtest(loto=args.loto, rounds=args.rounds, min_history=args.min_history, num_sets=args.num_sets)
