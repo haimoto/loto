@@ -54,26 +54,30 @@ for k in ("coverage", "hitprob"):
 
 ## 組数指定
 
-hitprob は完全非重複を前提とするため、組数には上限があります:
-- loto6: 最大 7 組（43 / 6 = 7.2）
-- loto7: 最大 5 組（37 / 7 = 5.2）
-
-上限を超える場合は coverage / ev モードで対応:
+hitprob の組数上限は 10。完全非重複の上限（loto6=7, loto7=5）までは
+disjoint 構築（瞬時）、それを超えると重複最小 + exact DP 山登りで生成
+（v5.7。決定論的だが生成に時間がかかる: loto7 6口≈5s / loto6 8口≈22s /
+9〜10口は1分〜数分）。
 
 ```python
-# hitprob の上限内
-lp.run_hitprob(draws, "loto6", num_sets=7)
-
-# 上限を超える大量組数は coverage / ev モードで
-lp.run(draws, "loto7", num_sets=10)
-lp.run(draws, "loto7", num_sets=10, ev_mode=True)
+lp.run_hitprob(draws, "loto6", num_sets=7)   # disjoint 上限（瞬時）
+lp.run_hitprob(draws, "loto7", num_sets=6)   # 上限超え（重複最小、約5s）
 ```
 
-バックテストで hitprob の最大非重複ポートフォリオを検証する場合:
+組数ごとの exact any3（≥3個を1口以上含む確率）:
+
+| 組数 | loto6 any3 | loto7 any3 |
+|---|---|---|
+| 5口 | 13.52% | 50.96% |
+| 6口 | 16.20% | 57.61% |
+| 7口 | 18.88% | 63.10% |
+| 8口 | 21.29% | 68.63% |
+
+バックテストで検証する場合:
 
 ```bash
-python3 backtest_hitprob_fast.py loto6 80 --num-sets max
-python3 backtest_hitprob_fast.py loto7 80 --num-sets max
+python3 backtest_hitprob_fast.py loto6 80 --num-sets max  # disjoint 上限
+python3 backtest_hitprob_fast.py loto7 80 --num-sets 6    # 上限超え
 ```
 
 ## 設計方針（前提）
@@ -89,6 +93,7 @@ python3 backtest_hitprob_fast.py loto7 80 --num-sets max
 - どのモードも的中率は理論期待値（loto6: 4.186/回, loto7: 6.622/回）に長期収束する
 - v5.5 から CSV にボーナス・賞金・口数列を保持。バックテストは厳密等級判定（loto6: 1〜5等、loto7: 1〜6等、ボーナス込み）と実績平均賞金ベースの ROI を出力
 - v5.6: hitprob の `_balanced_disjoint_portfolio` で決定論的 disjoint 構築、`exact_hitprob` を全組合せ列挙から DP に置換（loto6/7 とも 100〜5,000 倍高速化）。`backtest_hitprob_fast.py` で hitprob 単独の高速ウォークフォワード可能
+- v5.7: hitprob 組数を完全非重複上限超え（最大10組）まで拡張。固定組数では完全非重複が any3 の局所最適と数値確認済み（スワップ3,000試行で改善0件）。any3 を上げる唯一の手段は組数を増やすこと（＝購入額増）であり、それ以外の「バックテスト的中率向上」は過去データへの過適合にしかならない
 
 ## 厳守
 - 確認・質問・選択肢は禁止。即実行
