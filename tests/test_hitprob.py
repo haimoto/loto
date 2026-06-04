@@ -24,6 +24,35 @@ def test_loto6_seven_disjoint_sets_raise_any3_probability_over_five_sets():
     assert seven["any3"] > five["any3"]
 
 
-def test_hitprob_rejects_more_than_max_disjoint_sets():
-    with pytest.raises(ValueError, match="最大組数は 7 組"):
-        lp.generate_hitprob_from_draws([], "loto6", num_sets=8)
+def test_extended_loto6_eight_sets_beat_seven_disjoint():
+    seven = lp.exact_hitprob(_portfolio("loto6", 7), "loto6")
+    eight = lp.exact_hitprob(_portfolio("loto6", 8), "loto6")
+
+    assert eight["any3"] > seven["any3"]
+
+
+def test_extended_loto7_six_sets_beat_five_disjoint():
+    five = lp.exact_hitprob(_portfolio("loto7", 5), "loto7")
+    six = lp.exact_hitprob(_portfolio("loto7", 6), "loto7")
+
+    assert five["avg_pair_overlap"] == 0
+    assert six["any3"] > five["any3"]
+
+
+def test_extended_portfolio_is_deterministic():
+    assert _portfolio("loto7", 6) == _portfolio("loto7", 6)
+
+
+def test_extended_portfolio_sets_are_valid():
+    cfg = lp.LOTO_CONFIG["loto7"]
+    lo, hi = cfg["range"]
+    for nums in _portfolio("loto7", 6):
+        assert len(nums) == cfg["pick"]
+        assert len(set(nums)) == cfg["pick"]
+        assert all(lo <= n <= hi for n in nums)
+        assert tuple(nums) == tuple(sorted(nums))
+
+
+def test_hitprob_rejects_more_than_extended_cap():
+    with pytest.raises(ValueError, match="上限は 10"):
+        lp.generate_hitprob_from_draws([], "loto6", num_sets=11)

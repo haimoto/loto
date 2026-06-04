@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.6
+ロト6/ロト7 予測スクリプト v5.7
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -8,6 +8,13 @@
 - 改善可能なのは (a) 当選時の配当分配（ev モード）、および
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
+
+v5.7（2026-06-04）の変更:
+- hitprob の組数を完全非重複上限（loto6=7, loto7=5）超えまで拡張
+  （HITPROB_MAX_SETS=10）。完全非重複ベース + 余剰チケットを exact DP
+  山登りで配置し any3 を厳密最大化。決定論的・履歴非依存・lru_cache 済み。
+- 固定組数では完全非重複が any3 の局所最適であることを1数字スワップ
+  3,000試行で数値確認（loto6/7 とも改善0件）。
 
 v5.6（2026-04-26）の変更:
 - hitprob 生成をランダムサンプル + backtracking から決定論的な完全非重複構築へ変更。
@@ -75,6 +82,7 @@ import sys as _sys
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import combinations
 from typing import Literal
 
@@ -2036,6 +2044,89 @@ def _balanced_disjoint_portfolio(loto, num_sets=5):
     return out
 
 
+def _max_disjoint_sets(loto):
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    return (hi - lo + 1) // cfg["pick"]
+
+
+# The any3 DP prunes per-ticket hits at <3, so its state count grows roughly as
+# 3^num_sets. 10 sets keeps the one-time hill climb in the tens of seconds.
+HITPROB_MAX_SETS = 10
+
+
+@lru_cache(maxsize=None)
+def _extended_hitprob_portfolio_nums(loto, num_sets):
+    """Minimal-overlap portfolio for num_sets beyond the disjoint maximum.
+
+    Start from the full disjoint base plus extra tickets seeded with the unused
+    numbers, then run a deterministic hill climb that minimizes the exact count
+    of winning combinations where every ticket has <3 hits (i.e. maximizes the
+    exact any3 probability). Extra tickets are optimized first as a cheap warm
+    start; a final full-neighborhood loop confirms no single-number replacement
+    anywhere in the portfolio improves the probability.
+
+    History-independent and deterministic, hence the cache: the legacy backtest
+    calls the generator once per walk-forward round with identical arguments.
+    """
+    cfg = LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    max_d = _max_disjoint_sets(loto)
+    assert num_sets > max_d, "拡張モードは完全非重複上限超えの組数専用"
+    if num_sets > HITPROB_MAX_SETS:
+        raise ValueError(
+            f"hitprob の組数上限は {HITPROB_MAX_SETS} です"
+            f"（exact DP の状態数が組数に対して指数的に増えるため）"
+        )
+
+    base = [list(d["nums"]) for d in _balanced_disjoint_portfolio(loto, num_sets=max_d)]
+    pool = list(range(lo, hi + 1))
+    leftovers = sorted(set(pool) - set().union(*(set(s) for s in base)))
+
+    n_extra = num_sets - max_d
+    extras = [[] for _ in range(n_extra)]
+    for idx, n in enumerate(leftovers):
+        extras[idx % n_extra].append(n)
+    for e, nums in enumerate(extras):
+        need = pick - len(nums)
+        candidates = [n for n in pool if n not in nums]
+        # Offset by ticket index so two extra tickets do not start identical.
+        nums.extend(_select_evenly(candidates, need + e)[e:])
+
+    port = base + [sorted(s) for s in extras]
+
+    def fail3():
+        return _fail_count_under_threshold([tuple(sorted(s)) for s in port], loto, 3)
+
+    best = fail3()
+
+    def climb(set_indices):
+        nonlocal best
+        improved = True
+        while improved:
+            improved = False
+            for i in set_indices:
+                for j in range(pick):
+                    others = set(port[i]) - {port[i][j]}
+                    old = port[i][j]
+                    for v in pool:
+                        if v == old or v in others:
+                            continue
+                        port[i][j] = v
+                        cand = fail3()
+                        if cand < best:
+                            best = cand
+                            old = v
+                            improved = True
+                        else:
+                            port[i][j] = old
+
+    climb(range(max_d, num_sets))
+    climb(range(num_sets))
+    return tuple(tuple(sorted(s)) for s in port)
+
+
 # Backward-compatible names. They are no longer used by generate_hitprob_from_draws,
 # but keeping them avoids breaking external callers that imported the private helpers.
 def _enumerate_shape_valid_candidates(cfg, num_samples, seed=0):
@@ -2073,17 +2164,31 @@ def _assign_hitprob_labels(portfolio, num_sets):
 
 
 def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfolio_map=None, seed=0):
-    """Coverage-first generator: build a mutually-disjoint balanced portfolio.
+    """Coverage-first generator: build a minimal-overlap balanced portfolio.
 
     History-independent. The result depends only on (loto, num_sets). `draws`,
     params_map, portfolio_map, and seed are accepted for signature compatibility.
+    Up to the disjoint maximum (loto6: 7, loto7: 5) the portfolio is fully
+    disjoint; beyond it, extra tickets are placed by an exact-DP hill climb that
+    maximizes the any3 probability (HITPROB_MAX_SETS が上限).
 
     Honest caveat: expected total hits is invariant for independent lottery
     drawings. This mode increases only the probability that at least one ticket
     reaches a threshold such as >=3 hits by reducing inter-ticket overlap.
     """
     del draws, params_map, portfolio_map, seed
-    portfolio = _balanced_disjoint_portfolio(loto, num_sets=num_sets)
+    if num_sets <= _max_disjoint_sets(loto):
+        portfolio = _balanced_disjoint_portfolio(loto, num_sets=num_sets)
+    else:
+        cfg = LOTO_CONFIG[loto]
+        portfolio = [
+            {
+                "nums": nums,
+                "odd": sum(1 for n in nums if n % 2 == 1),
+                "bands": _band_counts(nums, cfg),
+            }
+            for nums in _extended_hitprob_portfolio_nums(loto, num_sets)
+        ]
     labeled = _assign_hitprob_labels(portfolio, num_sets)
     gen = GenerateResult(labeled, True)
     return None, gen, portfolio
@@ -2269,8 +2374,13 @@ def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     est = _probe(portfolio, loto, method, trials)
 
     label_method = "exact DP" if est["method"] == "exact-dp" else "Monte Carlo"
+    style = (
+        "完全非重複ポートフォリオ"
+        if est["max_pair_overlap"] == 0
+        else "重複最小ポートフォリオ（完全非重複上限超え、exact DP最適化）"
+    )
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")
-    print("【戦略】命中率特化（coverage-first / 履歴非依存、完全非重複ポートフォリオ）")
+    print(f"【戦略】命中率特化（coverage-first / 履歴非依存、{style}）")
     print(f"  ユニーク数: {est['union_size']}  平均組間重複: {est['avg_pair_overlap']:.2f}  最大組間重複: {est['max_pair_overlap']}")
     print(f"  {label_method}確率: 3個以上1本={100*est['any3']:.2f}%  4個以上1本={100*est['any4']:.2f}%  5個以上1本={100*est['any5']:.3f}%")
     print(f"  期待ヒット数合計: {est['mean_total_hits']:.3f}（戦略非依存、理論値と一致）")

@@ -4,10 +4,12 @@ Usage:
     python3 backtest_hitprob_fast.py loto6 80
     python3 backtest_hitprob_fast.py loto7 80
     python3 backtest_hitprob_fast.py loto6 80 --num-sets max
+    python3 backtest_hitprob_fast.py loto7 80 --num-sets 6   # 上限超え（重複最小）
 
 This script intentionally tests the strategy that can improve portfolio-level
-hit probability: fully disjoint hitprob mode. It avoids the slower historical
-heuristic modes from the legacy backtest.
+hit probability: minimal-overlap hitprob mode (fully disjoint up to the
+disjoint maximum, exact-DP optimized overlap beyond it). It avoids the slower
+historical heuristic modes from the legacy backtest.
 """
 
 from __future__ import annotations
@@ -37,8 +39,11 @@ def _parse_num_sets(value, loto):
         raise SystemExit("--num-sets は整数または max を指定してください") from exc
     if num_sets < 1:
         raise SystemExit("--num-sets は1以上を指定してください")
-    if num_sets > max_sets:
-        raise SystemExit(f"{loto} の hitprob 完全非重複上限は {max_sets} 組です")
+    if num_sets > lp.HITPROB_MAX_SETS:
+        raise SystemExit(
+            f"--num-sets の上限は {lp.HITPROB_MAX_SETS} です"
+            f"（完全非重複上限 {max_sets} 組超えは重複最小+exact DP最適化で生成）"
+        )
     return num_sets
 
 
@@ -147,7 +152,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-sets",
         default="5",
-        help="購入組数。整数または max（loto6=7, loto7=5）。デフォルトは5。",
+        help="購入組数。整数または max（完全非重複上限: loto6=7, loto7=5）。"
+             "上限超え〜10組は重複最小+exact DP最適化で生成。デフォルトは5。",
     )
     args = parser.parse_args()
     num_sets = _parse_num_sets(args.num_sets, args.loto)
