@@ -56,3 +56,67 @@ def test_extended_portfolio_sets_are_valid():
 def test_hitprob_rejects_more_than_extended_cap():
     with pytest.raises(ValueError, match="上限は 10"):
         lp.generate_hitprob_from_draws([], "loto6", num_sets=11)
+
+
+# Globally optimal fail3 (count of draws where no ticket reaches 3 hits) for each
+# extended portfolio, derived and verified offline by optimize_hitprob_extended.py.
+# Lower is better. These lock the v5.8 precomputed table against regression: any
+# future edit to a portfolio must not raise fail3 above the proven optimum.
+_OPTIMAL_FAIL3 = {
+    ("loto6", 8): 4798122,
+    ("loto6", 9): 4653802,
+    ("loto6", 10): 4509695,
+    ("loto7", 6): 4364271,
+    ("loto7", 7): 3790435,
+    ("loto7", 8): 3223042,
+    ("loto7", 9): 2669273,
+    ("loto7", 10): 2175649,
+}
+
+
+@pytest.mark.parametrize("loto,num_sets", sorted(_OPTIMAL_FAIL3))
+def test_precomputed_portfolio_is_globally_optimal(loto, num_sets):
+    sets = _portfolio(loto, num_sets)
+    fail3 = lp._fail_count_under_threshold([tuple(s) for s in sets], loto, 3)
+    assert fail3 == _OPTIMAL_FAIL3[(loto, num_sets)]
+
+
+def test_precomputed_beats_v57_disjoint_plus_leftover_hillclimb():
+    """The precomputed optimum must be no worse than the old local-optimum seed.
+
+    Reconstructs the v5.7 starting portfolio (disjoint base + leftover-filled
+    extras, no climb) and checks the shipped table reaches at least its any3.
+    """
+    for loto in ("loto6", "loto7"):
+        max_d = lp._max_disjoint_sets(loto)
+        cfg = lp.LOTO_CONFIG[loto]
+        lo, hi = cfg["range"]
+        pick = cfg["pick"]
+        pool = list(range(lo, hi + 1))
+        for num_sets in range(max_d + 1, lp.HITPROB_MAX_SETS + 1):
+            base = [list(d["nums"]) for d in
+                    lp._balanced_disjoint_portfolio(loto, num_sets=max_d)]
+            leftovers = sorted(set(pool) - set().union(*(set(s) for s in base)))
+            n_extra = num_sets - max_d
+            extras = [[] for _ in range(n_extra)]
+            for idx, n in enumerate(leftovers):
+                extras[idx % n_extra].append(n)
+            for e, nums in enumerate(extras):
+                cands = [n for n in pool if n not in nums]
+                nums.extend(lp._select_evenly(cands, pick - len(nums) + e)[e:])
+            seed = base + [sorted(s) for s in extras]
+            seed_fail3 = lp._fail_count_under_threshold(
+                [tuple(s) for s in seed], loto, 3)
+            shipped = lp._fail_count_under_threshold(
+                [tuple(s) for s in _portfolio(loto, num_sets)], loto, 3)
+            assert shipped <= seed_fail3, (loto, num_sets, shipped, seed_fail3)
+
+
+def test_extended_generation_is_instant():
+    """Regression guard: v5.8 replaced the minutes-long runtime hill climb with a
+    table lookup, so the slowest extended size must generate well under a second."""
+    import time
+
+    t0 = time.time()
+    lp.generate_hitprob_from_draws([], "loto6", num_sets=10)
+    assert time.time() - t0 < 1.0
