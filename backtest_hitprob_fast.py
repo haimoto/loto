@@ -8,8 +8,8 @@ Usage:
 
 This script intentionally tests the strategy that can improve portfolio-level
 hit probability: minimal-overlap hitprob mode (fully disjoint up to the
-disjoint maximum, exact-DP optimized overlap beyond it). It avoids the slower
-historical heuristic modes from the legacy backtest.
+disjoint maximum, globally any3-optimal overlap structure beyond it). It avoids
+the slower historical heuristic modes from the legacy backtest.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _parse_num_sets(value, loto):
     if num_sets > lp.HITPROB_MAX_SETS:
         raise SystemExit(
             f"--num-sets の上限は {lp.HITPROB_MAX_SETS} です"
-            f"（完全非重複上限 {max_sets} 組超えは重複最小+exact DP最適化で生成）"
+            f"（完全非重複上限 {max_sets} 組超えはグローバル最適の重複構造で生成）"
         )
     return num_sets
 
@@ -153,7 +153,7 @@ if __name__ == "__main__":
         "--num-sets",
         default="5",
         help="購入組数。整数または max（完全非重複上限: loto6=7, loto7=5）。"
-             "上限超え〜10組は重複最小+exact DP最適化で生成。デフォルトは5。",
+             "上限超え〜10組はグローバル最適の重複構造で生成。デフォルトは5。",
     )
     args = parser.parse_args()
     num_sets = _parse_num_sets(args.num_sets, args.loto)
