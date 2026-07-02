@@ -54,8 +54,8 @@ def test_extended_portfolio_sets_are_valid():
 
 
 def test_hitprob_rejects_more_than_extended_cap():
-    with pytest.raises(ValueError, match="上限は 15"):
-        lp.generate_hitprob_from_draws([], "loto6", num_sets=16)
+    with pytest.raises(ValueError, match="上限は 20"):
+        lp.generate_hitprob_from_draws([], "loto6", num_sets=21)
 
 
 # Globally optimal fail3 (count of draws where no ticket reaches 3 hits) for each
@@ -116,16 +116,26 @@ def test_precomputed_beats_v57_disjoint_plus_leftover_hillclimb():
 # NOT proven optima — they lock the shipped table against regression: any future
 # edit must not raise fail3 above the best structure found so far.
 _BEST_FOUND_FAIL3 = {
-    ("loto6", 11): 4366116,
+    ("loto6", 11): 4365806,
     ("loto6", 12): 4223057,
     ("loto6", 13): 4079965,
     ("loto6", 14): 3938577,
     ("loto6", 15): 3809045,
-    ("loto7", 11): 1797317,
+    ("loto7", 11): 1797292,
     ("loto7", 12): 1543360,
     ("loto7", 13): 1299108,
     ("loto7", 14): 1051869,
     ("loto7", 15): 831014,
+    ("loto6", 16): 3684920,
+    ("loto6", 17): 3562131,
+    ("loto6", 18): 3446997,
+    ("loto6", 19): 3336190,
+    ("loto6", 20): 3211133,
+    ("loto7", 16): 708921,
+    ("loto7", 17): 616250,
+    ("loto7", 18): 505817,
+    ("loto7", 19): 407876,
+    ("loto7", 20): 345176,
 }
 
 
@@ -156,6 +166,6 @@ def test_extended_generation_is_instant():
 
     t0 = time.time()
     lp.generate_hitprob_from_draws([], "loto6", num_sets=10)
-    lp.generate_hitprob_from_draws([], "loto6", num_sets=15)
-    lp.generate_hitprob_from_draws([], "loto7", num_sets=15)
+    lp.generate_hitprob_from_draws([], "loto6", num_sets=20)
+    lp.generate_hitprob_from_draws([], "loto7", num_sets=20)
     assert time.time() - t0 < 1.0
