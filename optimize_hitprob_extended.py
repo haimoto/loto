@@ -24,6 +24,10 @@
   python3 optimize_hitprob_extended.py emit
       （既知の最良構造から確定テーブルを再構築し、本番DPで fail3 を検証して
         Python リテラルを出力する）
+  python3 optimize_hitprob_extended.py emit-plus
+      （11-15口の best-found 構造 BEST_PLUS_MASKS から
+        _PRECOMPUTED_BEST_FOUND_PORTFOLIOS を再構築・検証・出力する。v5.9。
+        ペアのみの重複が次数制約で不可能な領域のため最適性証明なし）
 """
 import json
 import math
@@ -393,6 +397,49 @@ BEST_EXCESS_EDGES = {
 }
 
 
+# Best-found mask structures for 11-15 sets (拡張プラスモード, v5.9). Pair-only
+# simple graphs are infeasible here: excess E = m*pick - N exceeds the max edge
+# count of a degree<=pick graph, so numbers must be shared by 3+ tickets and
+# the structure is stored as {membership mask: count} over ticket indices.
+# Derived by multi-start simulated annealing (2 seeds per case, best kept).
+# NO optimality proof, unlike BEST_EXCESS_EDGES above.
+BEST_PLUS_MASKS = {
+    ('loto6', 11): {1: 5, 6: 1, 10: 1, 12: 1, 20: 1, 24: 1, 34: 1, 36: 1, 40: 1, 48: 1, 66: 1, 68: 1, 72: 1, 80: 1, 96: 1, 128: 6, 256: 5, 257: 1, 512: 4, 514: 1, 528: 1, 1026: 1, 1028: 1, 1032: 1, 1040: 1, 1056: 1, 1088: 1},
+    ('loto6', 12): {2: 3, 4: 1, 5: 1, 8: 2, 10: 1, 16: 3, 24: 1, 32: 2, 34: 1, 40: 1, 48: 1, 65: 1, 68: 1, 129: 1, 132: 1, 192: 1, 256: 2, 258: 1, 264: 1, 272: 1, 288: 1, 512: 1, 513: 1, 576: 1, 640: 1, 1025: 1, 1028: 1, 1088: 1, 1152: 1, 1536: 1, 2049: 1, 2052: 1, 2112: 1, 2176: 1, 2560: 1, 3072: 1},
+    ('loto6', 13): {1: 1, 2: 1, 3: 1, 8: 2, 9: 1, 10: 1, 20: 1, 36: 1, 48: 1, 68: 1, 80: 1, 96: 1, 128: 2, 129: 1, 130: 1, 260: 1, 272: 1, 288: 1, 320: 1, 512: 1, 513: 1, 514: 1, 520: 1, 640: 1, 1024: 1, 1025: 1, 1026: 1, 1032: 1, 1152: 1, 1536: 1, 2052: 1, 2064: 1, 2080: 1, 2112: 1, 2304: 1, 4100: 1, 4112: 1, 4128: 1, 4160: 1, 4352: 1, 6144: 1},
+    ('loto6', 14): {1: 1, 5: 1, 8: 1, 9: 1, 12: 1, 17: 1, 20: 1, 33: 1, 36: 1, 48: 1, 66: 1, 130: 1, 192: 1, 257: 1, 260: 1, 264: 1, 272: 1, 288: 1, 514: 1, 528: 1, 544: 1, 640: 1, 1026: 1, 1056: 1, 1088: 1, 1152: 1, 1536: 1, 2052: 1, 2056: 1, 2064: 1, 2112: 1, 2304: 1, 4098: 1, 4160: 1, 4224: 1, 4608: 1, 5120: 1, 8194: 1, 8200: 1, 8256: 1, 8320: 1, 10240: 1, 12288: 1},
+    ('loto6', 15): {5: 1, 9: 1, 10: 1, 17: 1, 18: 1, 20: 1, 33: 1, 34: 1, 56: 1, 132: 1, 160: 1, 192: 1, 320: 1, 513: 1, 516: 1, 520: 1, 640: 1, 768: 1, 1026: 1, 1040: 1, 1280: 1, 2052: 1, 2112: 1, 2432: 1, 2560: 1, 3072: 1, 4104: 1, 4128: 1, 4160: 1, 4354: 1, 5120: 1, 8194: 1, 8200: 1, 8256: 1, 8448: 1, 9216: 1, 12304: 1, 16385: 1, 16388: 1, 16416: 1, 16448: 1, 16512: 1, 18432: 1},
+    ('loto7', 11): {3: 1, 6: 1, 9: 1, 12: 1, 20: 1, 24: 1, 33: 1, 34: 1, 40: 1, 65: 1, 66: 1, 68: 1, 80: 1, 129: 1, 136: 1, 144: 1, 160: 1, 192: 1, 258: 1, 264: 1, 272: 1, 288: 1, 320: 1, 388: 1, 513: 1, 514: 1, 516: 1, 528: 1, 544: 1, 576: 1, 1026: 1, 1029: 1, 1032: 1, 1040: 1, 1056: 1, 1152: 1, 1792: 1},
+    ('loto7', 12): {3: 1, 5: 1, 17: 1, 24: 1, 33: 1, 40: 1, 48: 1, 65: 1, 66: 1, 68: 1, 130: 1, 132: 1, 136: 1, 144: 1, 257: 1, 268: 1, 272: 1, 290: 1, 320: 1, 514: 1, 516: 1, 520: 1, 576: 1, 672: 1, 1032: 1, 1042: 1, 1060: 1, 1088: 1, 1153: 1, 1792: 1, 2054: 1, 2056: 1, 2064: 1, 2144: 1, 2432: 1, 2560: 1, 3072: 1},
+    ('loto7', 13): {3: 1, 9: 1, 28: 1, 38: 1, 40: 1, 74: 1, 80: 1, 145: 1, 196: 1, 264: 1, 352: 1, 386: 1, 513: 1, 514: 1, 532: 1, 544: 1, 576: 1, 640: 1, 768: 1, 1029: 1, 1072: 1, 1088: 1, 1152: 1, 1280: 1, 2049: 1, 2066: 1, 2080: 1, 2184: 1, 2308: 1, 3072: 1, 4097: 1, 4108: 1, 4128: 1, 4224: 1, 4368: 1, 5122: 1, 6208: 1},
+    ('loto7', 14): {12: 1, 24: 1, 36: 1, 42: 1, 68: 1, 82: 1, 148: 1, 161: 1, 259: 1, 264: 1, 448: 1, 520: 1, 577: 1, 640: 1, 1025: 1, 1120: 1, 1152: 1, 1280: 1, 1552: 1, 2054: 1, 2065: 1, 2080: 1, 2184: 1, 2816: 1, 4101: 1, 4226: 1, 4368: 1, 4640: 1, 5122: 1, 6208: 1, 8193: 1, 8240: 1, 8256: 1, 8452: 1, 8706: 1, 11264: 1, 12296: 1},
+    ('loto7', 15): {3: 1, 26: 1, 81: 1, 100: 1, 168: 1, 296: 1, 388: 1, 514: 1, 517: 1, 584: 1, 656: 1, 1025: 1, 1072: 1, 1090: 1, 1792: 1, 2060: 1, 2082: 1, 2240: 1, 2320: 1, 4102: 1, 4225: 1, 4640: 1, 5128: 1, 6400: 1, 8212: 1, 8224: 1, 8512: 1, 9344: 1, 10241: 1, 12352: 1, 16388: 1, 16514: 1, 16641: 1, 17408: 1, 18944: 1, 20496: 1, 24584: 1},
+}
+
+
+def emit_plus_table():
+    """Rebuild the best-found 11-15 set portfolios from BEST_PLUS_MASKS,
+    verify against the production DP, and print the Python literal."""
+    print("_PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {")
+    for (loto, m), masks in sorted(BEST_PLUS_MASKS.items()):
+        cfg = lp.LOTO_CONFIG[loto]
+        lo, hi = cfg["range"]
+        pick = cfg["pick"]
+        n_pool = hi - lo + 1
+        port = shape_polish(masks_to_portfolio(masks, m, n_pool, lo), cfg)
+        f_tool = fail_count(portfolio_to_masks(port), m, n_pool, pick)
+        f_prod = lp._fail_count_under_threshold(port, loto, 3)
+        assert f_tool == f_prod, (loto, m, f_tool, f_prod)
+        total = comb(n_pool, pick)
+        any3 = 1 - f_prod / total
+        print(f"    # fail3={f_prod}, exact any3={any3*100:.4f}% (best-found)")
+        print(f"    ({loto!r}, {m}): (")
+        for t in port:
+            print(f"        {t},")
+        print("    ),")
+    print("}")
+
+
 def emit_table():
     """Rebuild final portfolios from BEST_EXCESS_EDGES, verify, print literal."""
     print("_PRECOMPUTED_EXTENDED_PORTFOLIOS = {")
@@ -427,6 +474,8 @@ def main():
         print(json.dumps({"fail3": best, "portfolio": [list(t) for t in port]}))
     elif cmd == "emit":
         emit_table()
+    elif cmd == "emit-plus":
+        emit_plus_table()
     else:
         raise SystemExit(f"unknown command: {cmd}")
 
