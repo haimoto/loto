@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.8
+ロト6/ロト7 予測スクリプト v5.10
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -8,6 +8,27 @@
 - 改善可能なのは (a) 当選時の配当分配（ev モード）、および
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
+
+v5.10（2026-07-03）の変更:
+- hitprob 組数上限を 15→20 に拡張（拡張プラスモード第2弾、v5.9 と同じ
+  best-found 方式・最適性証明なし）。exact any3: loto6 20口 47.33% /
+  loto7 20口 96.65%。
+- 11口の2ケースを追加シードで微改善（loto6 11口 28.3827→28.3878% /
+  loto7 11口 82.5426→82.5429%）。他8ケースは4独立シードが既存 best を
+  超えられず、best-found の信頼度を補強。
+- optimize_hitprob_extended.anneal の最終山登りの時間チェックをスイープ
+  単位→評価単位に修正（15口で約30分、20口で数時間の予算超過を解消）。
+
+v5.9（2026-07-03）の変更:
+- hitprob 組数上限を 10→15 に拡張（拡張プラスモード）。11口以上は excess が
+  次数制約 (<=pick) を超えるためペアのみの重複構造が存在せず（数字を3チケット
+  以上で共有する必要がある）、構造空間の全数探索も届かない。よって多スタート
+  焼きなましの best-found 構造（_PRECOMPUTED_BEST_FOUND_PORTFOLIOS）を即時参照
+  する。**最適性証明なし**（10口以下は従来どおりグローバル最適）。any3 の組数
+  単調増加は構成的に保証される。
+- _fail_count_under_threshold を終了チケット周辺化 + 貪欲マスク順序の DP に
+  置換（optimize_hitprob_extended.fail_count と同一アルゴリズム）。15口の
+  exact 計算が threshold=5 で約45秒 → 数秒に短縮。
 
 v5.8（2026-06-11）の変更:
 - 拡張 hitprob（完全非重複上限超え）の余剰チケット配置を、v5.7 の実行時
@@ -2054,9 +2075,12 @@ def _max_disjoint_sets(loto):
     return (hi - lo + 1) // cfg["pick"]
 
 
-# The any3 DP state count grows roughly as 3^num_sets, so 10 sets is the
-# supported maximum for the extended hitprob portfolios below.
-HITPROB_MAX_SETS = 10
+# Up to 10 sets the precomputed structures are proven (or near-proven) global
+# optima; 11-20 sets are best-found structures from multi-start annealing
+# (proof of optimality is out of reach there because pair-only overlap becomes
+# infeasible and the structure space explodes). See the table comments below.
+HITPROB_MAX_SETS = 20
+HITPROB_PROVEN_OPTIMAL_MAX_SETS = 10
 
 
 # Globally any3-optimal portfolios for num_sets beyond the fully disjoint maximum
@@ -2165,6 +2189,389 @@ _PRECOMPUTED_EXTENDED_PORTFOLIOS = {
 }
 
 
+# Best-found portfolios for 11-20 sets (拡張プラスモード). Unlike the table
+# above these carry NO optimality proof: pair-only overlap structures are
+# infeasible here (the excess E = num_sets*pick - N exceeds what degree<=pick
+# simple graphs can hold), numbers must be shared by 3+ tickets, and the
+# resulting structure space is beyond exhaustive search. Each entry is the
+# best of multi-start simulated annealing runs (optimize_hitprob_extended.py
+# BEST_PLUS_MASKS + emit_plus), verified against _fail_count_under_threshold.
+# any3 is still guaranteed to increase with num_sets because appending any
+# ticket to a smaller portfolio can only shrink the fail set.
+_PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
+    # fail3=4365806, exact any3=28.3878% (best-found)
+    ('loto6', 11): (
+        (2, 13, 18, 21, 36, 39),
+        (10, 11, 24, 26, 27, 31),
+        (4, 10, 22, 25, 32, 33),
+        (6, 7, 16, 20, 37, 41),
+        (9, 14, 19, 24, 28, 33),
+        (4, 9, 23, 27, 30, 34),
+        (11, 12, 19, 22, 29, 34),
+        (1, 2, 8, 35, 38, 43),
+        (3, 14, 23, 26, 29, 32),
+        (5, 8, 15, 17, 40, 42),
+        (3, 12, 25, 28, 30, 31),
+    ),
+    # fail3=4223057, exact any3=30.7293% (best-found)
+    ('loto6', 12): (
+        (9, 18, 19, 23, 24, 30),
+        (11, 13, 16, 20, 29, 34),
+        (7, 12, 14, 24, 27, 37),
+        (5, 8, 13, 26, 35, 36),
+        (1, 8, 15, 17, 40, 42),
+        (4, 5, 16, 17, 38, 43),
+        (9, 12, 21, 22, 28, 33),
+        (10, 14, 19, 22, 25, 32),
+        (3, 4, 15, 26, 34, 41),
+        (2, 6, 21, 25, 30, 39),
+        (6, 10, 18, 27, 31, 33),
+        (2, 7, 23, 28, 31, 32),
+    ),
+    # fail3=4079965, exact any3=33.0764% (best-found)
+    ('loto6', 13): (
+        (6, 9, 14, 25, 27, 42),
+        (8, 9, 16, 23, 31, 40),
+        (7, 12, 13, 26, 28, 37),
+        (4, 5, 16, 27, 30, 41),
+        (3, 13, 20, 22, 33, 34),
+        (11, 12, 19, 21, 22, 38),
+        (7, 10, 21, 24, 29, 34),
+        (2, 8, 17, 25, 35, 36),
+        (3, 15, 19, 26, 29, 32),
+        (5, 6, 17, 18, 39, 40),
+        (2, 4, 14, 23, 39, 43),
+        (1, 11, 20, 24, 32, 37),
+        (1, 10, 15, 28, 33, 38),
+    ),
+    # fail3=3938577, exact any3=35.3956% (best-found)
+    ('loto6', 14): (
+        (10, 12, 15, 26, 29, 39),
+        (2, 6, 25, 27, 34, 37),
+        (9, 11, 21, 26, 31, 32),
+        (10, 11, 16, 17, 35, 42),
+        (7, 18, 21, 22, 24, 39),
+        (7, 12, 20, 28, 31, 33),
+        (1, 4, 19, 30, 34, 41),
+        (5, 8, 13, 30, 37, 40),
+        (9, 14, 18, 28, 29, 35),
+        (2, 13, 22, 23, 33, 38),
+        (5, 6, 20, 23, 36, 41),
+        (1, 14, 17, 24, 32, 43),
+        (3, 8, 19, 27, 36, 38),
+        (3, 4, 16, 25, 40, 43),
+    ),
+    # fail3=3809045, exact any3=37.5203% (best-found)
+    ('loto6', 15): (
+        (6, 17, 20, 21, 25, 42),
+        (4, 14, 23, 26, 29, 37),
+        (5, 10, 20, 27, 33, 38),
+        (4, 9, 22, 25, 32, 39),
+        (6, 15, 22, 29, 30, 33),
+        (11, 14, 17, 22, 31, 36),
+        (3, 12, 16, 19, 40, 43),
+        (5, 13, 18, 24, 31, 40),
+        (1, 13, 16, 26, 34, 41),
+        (9, 10, 21, 24, 34, 35),
+        (2, 8, 15, 28, 37, 41),
+        (7, 12, 13, 28, 35, 38),
+        (8, 11, 19, 26, 30, 39),
+        (1, 2, 23, 30, 32, 43),
+        (3, 7, 18, 27, 36, 42),
+    ),
+    # fail3=1797292, exact any3=82.5429% (best-found)
+    ('loto7', 11): (
+        (5, 12, 14, 22, 23, 25, 32),
+        (3, 11, 18, 20, 21, 27, 36),
+        (9, 10, 14, 16, 21, 31, 33),
+        (8, 12, 13, 15, 20, 30, 35),
+        (8, 11, 14, 17, 19, 26, 37),
+        (3, 9, 17, 22, 24, 28, 29),
+        (2, 4, 16, 18, 25, 34, 35),
+        (1, 10, 19, 23, 24, 27, 30),
+        (1, 4, 7, 26, 29, 32, 33),
+        (6, 7, 13, 21, 23, 28, 34),
+        (2, 5, 6, 15, 31, 36, 37),
+    ),
+    # fail3=1543360, exact any3=85.0093% (best-found)
+    ('loto7', 12): (
+        (4, 12, 16, 20, 24, 26, 27),
+        (8, 9, 12, 14, 17, 33, 37),
+        (7, 8, 15, 19, 24, 28, 29),
+        (3, 7, 13, 18, 25, 30, 36),
+        (5, 6, 13, 16, 22, 31, 37),
+        (5, 11, 14, 19, 23, 26, 30),
+        (1, 9, 10, 20, 23, 29, 34),
+        (4, 11, 17, 18, 21, 28, 31),
+        (2, 7, 14, 21, 22, 27, 34),
+        (1, 2, 11, 15, 32, 33, 36),
+        (2, 4, 10, 19, 25, 35, 37),
+        (3, 6, 8, 21, 23, 32, 35),
+    ),
+    # fail3=1299108, exact any3=87.3818% (best-found)
+    ('loto7', 13): (
+        (3, 6, 13, 14, 28, 33, 35),
+        (10, 11, 15, 16, 23, 28, 30),
+        (5, 8, 16, 20, 25, 27, 33),
+        (8, 10, 13, 17, 20, 26, 37),
+        (8, 14, 15, 18, 21, 27, 29),
+        (4, 7, 16, 17, 21, 31, 36),
+        (1, 5, 10, 24, 29, 31, 32),
+        (5, 9, 11, 14, 22, 34, 37),
+        (2, 11, 18, 19, 25, 26, 31),
+        (3, 7, 19, 22, 24, 27, 30),
+        (2, 9, 12, 21, 23, 32, 33),
+        (1, 6, 12, 15, 25, 36, 37),
+        (1, 4, 18, 20, 23, 34, 35),
+    ),
+    # fail3=1051869, exact any3=89.7832% (best-found)
+    ('loto7', 14): (
+        (2, 6, 15, 20, 25, 27, 34),
+        (3, 6, 14, 17, 29, 31, 32),
+        (8, 9, 13, 18, 21, 27, 32),
+        (1, 8, 10, 23, 24, 30, 31),
+        (3, 11, 16, 21, 22, 25, 30),
+        (2, 7, 13, 16, 26, 31, 33),
+        (3, 7, 15, 18, 19, 28, 36),
+        (2, 10, 12, 17, 21, 28, 37),
+        (5, 6, 9, 22, 23, 28, 35),
+        (5, 11, 12, 15, 24, 26, 29),
+        (4, 7, 11, 14, 20, 35, 37),
+        (4, 5, 10, 19, 25, 32, 33),
+        (1, 14, 17, 19, 22, 26, 27),
+        (1, 4, 9, 16, 29, 34, 36),
+    ),
+    # fail3=831014, exact any3=91.9284% (best-found)
+    ('loto7', 15): (
+        (4, 6, 7, 13, 30, 35, 37),
+        (3, 4, 17, 22, 26, 29, 31),
+        (6, 10, 15, 19, 22, 27, 32),
+        (5, 8, 14, 23, 24, 27, 29),
+        (9, 12, 13, 15, 16, 29, 36),
+        (8, 10, 12, 17, 24, 25, 33),
+        (1, 10, 13, 21, 23, 26, 34),
+        (3, 8, 16, 19, 21, 28, 35),
+        (1, 2, 11, 19, 24, 36, 37),
+        (6, 11, 16, 20, 23, 25, 31),
+        (5, 11, 12, 18, 26, 28, 30),
+        (2, 7, 17, 20, 21, 27, 36),
+        (2, 5, 9, 22, 25, 34, 35),
+        (1, 7, 14, 15, 28, 33, 34),
+        (3, 9, 14, 18, 20, 32, 37),
+    ),
+    # fail3=3684920, exact any3=39.5563% (best-found)
+    ('loto6', 16): (
+        (9, 12, 13, 25, 30, 40),
+        (6, 11, 16, 21, 34, 39),
+        (3, 8, 10, 26, 39, 41),
+        (10, 13, 19, 22, 27, 36),
+        (13, 17, 18, 24, 28, 29),
+        (5, 9, 20, 28, 31, 36),
+        (5, 12, 21, 22, 29, 38),
+        (7, 19, 20, 23, 30, 32),
+        (3, 4, 7, 34, 37, 42),
+        (5, 8, 24, 27, 32, 33),
+        (4, 12, 16, 19, 35, 43),
+        (1, 16, 23, 25, 29, 36),
+        (10, 14, 15, 17, 31, 42),
+        (1, 14, 18, 22, 33, 41),
+        (1, 2, 11, 35, 38, 40),
+        (2, 6, 15, 26, 37, 43),
+    ),
+    # fail3=3562131, exact any3=41.5704% (best-found)
+    ('loto6', 17): (
+        (8, 12, 19, 24, 27, 35),
+        (6, 9, 19, 26, 30, 33),
+        (13, 17, 18, 21, 28, 30),
+        (3, 8, 20, 26, 29, 39),
+        (1, 4, 22, 23, 34, 41),
+        (10, 11, 18, 23, 26, 37),
+        (2, 9, 21, 25, 32, 36),
+        (11, 12, 14, 25, 28, 31),
+        (9, 13, 14, 20, 24, 43),
+        (4, 5, 7, 29, 38, 42),
+        (6, 13, 16, 22, 31, 37),
+        (1, 5, 10, 33, 36, 40),
+        (6, 11, 15, 17, 38, 40),
+        (7, 14, 16, 23, 30, 35),
+        (1, 3, 18, 27, 32, 42),
+        (7, 10, 15, 21, 34, 39),
+        (2, 5, 16, 17, 41, 43),
+    ),
+    # fail3=3446997, exact any3=43.4590% (best-found)
+    ('loto6', 18): (
+        (2, 9, 15, 24, 35, 42),
+        (2, 14, 20, 21, 27, 43),
+        (3, 12, 21, 22, 32, 37),
+        (8, 11, 16, 24, 30, 37),
+        (4, 7, 24, 27, 29, 36),
+        (1, 6, 23, 28, 32, 39),
+        (5, 14, 17, 19, 28, 42),
+        (3, 13, 18, 19, 34, 40),
+        (6, 10, 15, 18, 37, 41),
+        (9, 16, 20, 23, 25, 34),
+        (1, 11, 20, 22, 33, 40),
+        (1, 7, 12, 26, 38, 43),
+        (8, 10, 17, 27, 31, 34),
+        (5, 6, 12, 31, 35, 36),
+        (3, 7, 25, 28, 30, 33),
+        (4, 13, 16, 17, 38, 39),
+        (2, 8, 23, 25, 29, 38),
+        (5, 18, 21, 26, 29, 30),
+    ),
+    # fail3=3336190, exact any3=45.2765% (best-found)
+    ('loto6', 19): (
+        (1, 9, 20, 29, 32, 36),
+        (3, 6, 16, 27, 35, 40),
+        (8, 14, 17, 23, 31, 34),
+        (5, 13, 18, 19, 34, 35),
+        (1, 10, 16, 25, 38, 39),
+        (2, 4, 23, 28, 33, 37),
+        (5, 6, 11, 24, 36, 43),
+        (10, 17, 21, 22, 28, 29),
+        (11, 14, 18, 25, 26, 33),
+        (11, 16, 19, 20, 28, 31),
+        (1, 8, 19, 22, 37, 40),
+        (9, 10, 12, 13, 41, 42),
+        (7, 9, 21, 26, 30, 31),
+        (4, 5, 20, 27, 30, 41),
+        (2, 8, 15, 24, 35, 43),
+        (3, 7, 12, 33, 34, 38),
+        (4, 7, 17, 26, 32, 39),
+        (2, 11, 22, 27, 29, 39),
+        (5, 14, 15, 21, 32, 42),
+    ),
+    # fail3=3211133, exact any3=47.3279% (best-found)
+    ('loto6', 20): (
+        (3, 12, 16, 26, 31, 39),
+        (8, 11, 17, 23, 30, 38),
+        (5, 16, 24, 25, 28, 29),
+        (2, 13, 20, 23, 33, 36),
+        (11, 13, 21, 24, 26, 27),
+        (6, 7, 9, 31, 34, 40),
+        (5, 7, 20, 24, 32, 41),
+        (10, 14, 17, 19, 33, 34),
+        (10, 11, 18, 22, 31, 37),
+        (8, 9, 18, 27, 32, 35),
+        (7, 14, 18, 26, 29, 33),
+        (1, 6, 15, 28, 38, 39),
+        (1, 10, 16, 21, 40, 43),
+        (4, 17, 20, 22, 29, 35),
+        (6, 12, 19, 27, 30, 36),
+        (2, 3, 19, 22, 38, 43),
+        (12, 13, 15, 22, 25, 42),
+        (3, 4, 11, 34, 36, 41),
+        (4, 5, 8, 33, 37, 42),
+        (2, 14, 21, 25, 30, 35),
+    ),
+    # fail3=708921, exact any3=93.1142% (best-found)
+    ('loto7', 16): (
+        (9, 12, 14, 15, 17, 31, 36),
+        (3, 12, 13, 21, 24, 27, 34),
+        (2, 8, 16, 17, 25, 29, 37),
+        (4, 5, 18, 19, 24, 29, 36),
+        (1, 8, 19, 22, 26, 27, 33),
+        (1, 4, 17, 20, 28, 30, 35),
+        (9, 11, 12, 19, 20, 26, 37),
+        (6, 11, 15, 21, 25, 26, 30),
+        (2, 7, 13, 18, 30, 33, 34),
+        (6, 7, 14, 20, 27, 29, 31),
+        (5, 8, 13, 23, 26, 31, 32),
+        (7, 9, 11, 22, 24, 28, 32),
+        (1, 10, 15, 16, 23, 34, 35),
+        (5, 10, 14, 21, 25, 28, 33),
+        (2, 3, 16, 18, 27, 32, 35),
+        (3, 6, 10, 22, 23, 36, 37),
+    ),
+    # fail3=616250, exact any3=94.0144% (best-found)
+    ('loto7', 17): (
+        (7, 9, 10, 19, 22, 31, 32),
+        (1, 6, 11, 19, 23, 34, 36),
+        (1, 3, 16, 20, 27, 30, 33),
+        (5, 11, 15, 22, 25, 26, 28),
+        (1, 6, 15, 18, 24, 32, 37),
+        (7, 12, 16, 21, 23, 26, 29),
+        (1, 12, 17, 21, 22, 27, 32),
+        (8, 9, 11, 13, 24, 29, 36),
+        (7, 12, 13, 18, 20, 28, 34),
+        (5, 9, 14, 16, 17, 34, 35),
+        (4, 8, 10, 14, 23, 33, 37),
+        (8, 10, 15, 17, 26, 27, 31),
+        (5, 10, 16, 18, 21, 25, 36),
+        (2, 4, 13, 19, 26, 33, 35),
+        (2, 7, 17, 23, 24, 28, 30),
+        (3, 4, 6, 21, 30, 31, 35),
+        (2, 3, 14, 20, 25, 29, 37),
+    ),
+    # fail3=505817, exact any3=95.0870% (best-found)
+    ('loto7', 18): (
+        (5, 17, 18, 20, 21, 25, 26),
+        (5, 6, 13, 16, 24, 25, 37),
+        (6, 8, 13, 17, 22, 31, 36),
+        (3, 4, 13, 19, 23, 30, 34),
+        (2, 3, 14, 21, 28, 33, 34),
+        (6, 11, 15, 16, 26, 27, 29),
+        (6, 9, 10, 18, 19, 33, 35),
+        (7, 10, 12, 21, 23, 25, 28),
+        (9, 11, 12, 16, 17, 31, 34),
+        (3, 8, 12, 15, 24, 32, 35),
+        (1, 4, 10, 14, 31, 32, 37),
+        (1, 11, 13, 18, 28, 29, 32),
+        (4, 5, 9, 22, 26, 29, 35),
+        (1, 8, 16, 20, 23, 29, 33),
+        (2, 7, 19, 24, 26, 27, 31),
+        (7, 9, 11, 14, 20, 30, 36),
+        (1, 5, 15, 22, 27, 30, 32),
+        (2, 4, 15, 17, 18, 36, 37),
+    ),
+    # fail3=407876, exact any3=96.0383% (best-found)
+    ('loto7', 19): (
+        (2, 7, 15, 20, 27, 28, 33),
+        (1, 10, 13, 18, 26, 29, 36),
+        (5, 12, 16, 18, 19, 27, 33),
+        (1, 11, 12, 20, 23, 28, 37),
+        (8, 10, 14, 17, 23, 25, 33),
+        (2, 9, 15, 18, 25, 30, 31),
+        (7, 11, 14, 18, 22, 25, 35),
+        (5, 10, 14, 15, 21, 34, 35),
+        (4, 7, 16, 21, 23, 29, 30),
+        (6, 12, 15, 17, 22, 29, 32),
+        (5, 6, 16, 20, 24, 25, 34),
+        (1, 3, 21, 22, 24, 30, 33),
+        (4, 9, 10, 19, 24, 27, 37),
+        (6, 8, 11, 23, 26, 27, 31),
+        (3, 5, 7, 13, 32, 36, 37),
+        (3, 4, 16, 17, 28, 31, 35),
+        (8, 9, 11, 19, 20, 29, 34),
+        (2, 4, 14, 19, 26, 32, 34),
+        (2, 8, 12, 13, 21, 36, 37),
+    ),
+    # fail3=345176, exact any3=96.6473% (best-found)
+    ('loto7', 20): (
+        (1, 5, 12, 22, 25, 32, 36),
+        (6, 14, 17, 19, 22, 23, 28),
+        (6, 7, 18, 21, 25, 26, 31),
+        (2, 5, 9, 21, 29, 30, 34),
+        (3, 10, 15, 16, 25, 28, 37),
+        (1, 4, 15, 18, 28, 33, 34),
+        (2, 10, 14, 15, 24, 32, 35),
+        (7, 8, 13, 18, 22, 29, 35),
+        (3, 11, 13, 16, 22, 31, 34),
+        (5, 6, 13, 20, 23, 30, 33),
+        (2, 7, 11, 17, 24, 33, 36),
+        (7, 10, 15, 19, 20, 27, 30),
+        (6, 8, 12, 21, 24, 28, 31),
+        (11, 12, 16, 19, 20, 25, 29),
+        (1, 11, 14, 18, 27, 30, 37),
+        (3, 9, 14, 19, 24, 26, 37),
+        (1, 9, 12, 20, 23, 34, 35),
+        (5, 8, 16, 17, 26, 27, 32),
+        (4, 10, 13, 17, 21, 26, 37),
+        (3, 4, 8, 23, 27, 31, 36),
+    ),
+}
+
+
 def _extended_hitprob_portfolio_nums(loto, num_sets):
     """Globally any3-optimal portfolio for num_sets beyond the disjoint maximum.
 
@@ -2180,12 +2587,14 @@ def _extended_hitprob_portfolio_nums(loto, num_sets):
     if num_sets > HITPROB_MAX_SETS:
         raise ValueError(
             f"hitprob の組数上限は {HITPROB_MAX_SETS} です"
-            f"（exact DP の状態数が組数に対して指数的に増えるため）"
+            f"（21口以上の最適構造は未導出）"
         )
     key = (loto, num_sets)
-    if key not in _PRECOMPUTED_EXTENDED_PORTFOLIOS:
-        raise ValueError(f"未対応の拡張組数です: loto={loto}, num_sets={num_sets}")
-    return _PRECOMPUTED_EXTENDED_PORTFOLIOS[key]
+    if key in _PRECOMPUTED_EXTENDED_PORTFOLIOS:
+        return _PRECOMPUTED_EXTENDED_PORTFOLIOS[key]
+    if key in _PRECOMPUTED_BEST_FOUND_PORTFOLIOS:
+        return _PRECOMPUTED_BEST_FOUND_PORTFOLIOS[key]
+    raise ValueError(f"未対応の拡張組数です: loto={loto}, num_sets={num_sets}")
 
 
 # Backward-compatible names. They are no longer used by generate_hitprob_from_draws,
@@ -2231,7 +2640,8 @@ def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfo
     params_map, portfolio_map, and seed are accepted for signature compatibility.
     Up to the disjoint maximum (loto6: 7, loto7: 5) the portfolio is fully
     disjoint; beyond it, the globally any3-optimal overlap structure is read from
-    _PRECOMPUTED_EXTENDED_PORTFOLIOS (HITPROB_MAX_SETS が上限).
+    _PRECOMPUTED_EXTENDED_PORTFOLIOS (10口まで・最適証明あり)、11口以上は
+    _PRECOMPUTED_BEST_FOUND_PORTFOLIOS (best-found、HITPROB_MAX_SETS が上限).
 
     Honest caveat: expected total hits is invariant for independent lottery
     drawings. This mode increases only the probability that at least one ticket
@@ -2275,6 +2685,13 @@ def _fail_count_under_threshold(portfolio, loto, threshold):
 
     Generic exact DP over membership masks. This handles both disjoint and
     overlapping portfolios without enumerating C(N, pick) draws.
+
+    v5.9: the hit dimension of a ticket is marginalized out as soon as no
+    remaining mask touches that ticket, and masks are ordered greedily to keep
+    the active-ticket set small (ported from optimize_hitprob_extended
+    .fail_count, cross-validated by the fixed fail3 values in
+    tests/test_hitprob.py). Without this the state count grows like
+    threshold^m and 15-ticket portfolios took ~45 s per call.
     """
     from math import comb
 
@@ -2294,34 +2711,81 @@ def _fail_count_under_threshold(portfolio, loto, threshold):
                 mask |= 1 << i
         mask_counts[mask] += 1
 
-    # state: (selected_count, hit_tuple) -> number of ways
-    zero_hits = (0,) * m
-    dp = {(0, zero_hits): 1}
-    for mask, count in sorted(mask_counts.items()):
+    counts = [(mk, c) for mk, c in mask_counts.items() if mk and c > 0]
+    z = mask_counts.get(0, 0)  # numbers in no ticket
+
+    # Greedy mask order: at each step pick the mask that leaves the fewest
+    # still-active tickets (ties: smallest combined active set).
+    remaining = list(range(len(counts)))
+    order = []
+    active = set()
+    while remaining:
+        best_i, best_key = None, None
+        for i in remaining:
+            bits = {b for b in range(m) if counts[i][0] & (1 << b)}
+            other = 0
+            for j in remaining:
+                if j != i:
+                    other |= counts[j][0]
+            still = {b for b in (active | bits) if other & (1 << b)}
+            key = (len(still), len(active | bits))
+            if best_key is None or key < best_key:
+                best_key, best_i = key, i
+        order.append(best_i)
+        active |= {b for b in range(m) if counts[best_i][0] & (1 << b)}
+        remaining.remove(best_i)
+        other = 0
+        for j in remaining:
+            other |= counts[j][0]
+        active = {b for b in active if other & (1 << b)}
+
+    seq = [counts[i] for i in order]
+    last_idx = {}
+    for idx, (mk, _c) in enumerate(seq):
+        for b in range(m):
+            if mk & (1 << b):
+                last_idx[b] = idx
+
+    # state: (selected_count, hits of active tickets) -> number of ways
+    active_list = []
+    dp = {(0, ()): 1}
+    for idx, (mk, count) in enumerate(seq):
+        bits = [b for b in range(m) if mk & (1 << b)]
+        for b in bits:
+            if b not in active_list:
+                active_list.append(b)
+                dp = {(sel, hits + (0,)): w for (sel, hits), w in dp.items()}
+        pos = [active_list.index(b) for b in bits]
+        choices = [comb(count, take) for take in range(min(count, pick) + 1)]
         new = {}
-        max_take = min(count, pick)
-        affected = [i for i in range(m) if mask & (1 << i)]
-        choices = [comb(count, take) for take in range(max_take + 1)]
-        for (selected, hits), ways in dp.items():
-            remaining = pick - selected
-            for take in range(min(max_take, remaining) + 1):
+        for (sel, hits), ways in dp.items():
+            room = min(threshold - 1 - hits[p] for p in pos)
+            for take in range(min(count, pick - sel, room) + 1):
                 if take == 0:
-                    key = (selected, hits)
+                    key = (sel, hits)
                     new[key] = new.get(key, 0) + ways
                     continue
-                next_hits = list(hits)
-                ok = True
-                for i in affected:
-                    next_hits[i] += take
-                    if next_hits[i] >= threshold:
-                        ok = False
-                        break
-                if not ok:
-                    continue
-                key = (selected + take, tuple(next_hits))
+                h = list(hits)
+                for p in pos:
+                    h[p] += take
+                key = (sel + take, tuple(h))
                 new[key] = new.get(key, 0) + ways * choices[take]
         dp = new
-    return sum(ways for (selected, _hits), ways in dp.items() if selected == pick)
+        finished = [b for b in active_list if last_idx[b] == idx]
+        if finished:
+            drop = sorted((active_list.index(b) for b in finished), reverse=True)
+            merged = {}
+            for (sel, hits), ways in dp.items():
+                h = list(hits)
+                for p in drop:
+                    del h[p]
+                key = (sel, tuple(h))
+                merged[key] = merged.get(key, 0) + ways
+            dp = merged
+            for b in finished:
+                active_list.remove(b)
+
+    return sum(w * comb(z, pick - sel) for (sel, _h), w in dp.items())
 
 
 def exact_hitprob(portfolio, loto):
@@ -2435,11 +2899,15 @@ def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     est = _probe(portfolio, loto, method, trials)
 
     label_method = "exact DP" if est["method"] == "exact-dp" else "Monte Carlo"
-    style = (
-        "完全非重複ポートフォリオ"
-        if est["max_pair_overlap"] == 0
-        else "重複最小ポートフォリオ（完全非重複上限超え、グローバル最適）"
-    )
+    if est["max_pair_overlap"] == 0:
+        style = "完全非重複ポートフォリオ"
+    elif num_sets <= HITPROB_PROVEN_OPTIMAL_MAX_SETS:
+        style = "重複最小ポートフォリオ（完全非重複上限超え、グローバル最適）"
+    else:
+        style = (
+            "重複最小ポートフォリオ（11口以上・拡張プラスモード、"
+            "焼きなまし多スタートの best-found 構造・最適性証明なし）"
+        )
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")
     print(f"【戦略】命中率特化（coverage-first / 履歴非依存、{style}）")
     print(f"  ユニーク数: {est['union_size']}  平均組間重複: {est['avg_pair_overlap']:.2f}  最大組間重複: {est['max_pair_overlap']}")

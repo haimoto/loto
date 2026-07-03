@@ -54,8 +54,8 @@ def test_extended_portfolio_sets_are_valid():
 
 
 def test_hitprob_rejects_more_than_extended_cap():
-    with pytest.raises(ValueError, match="上限は 10"):
-        lp.generate_hitprob_from_draws([], "loto6", num_sets=11)
+    with pytest.raises(ValueError, match="上限は 20"):
+        lp.generate_hitprob_from_draws([], "loto6", num_sets=21)
 
 
 # Globally optimal fail3 (count of draws where no ticket reaches 3 hits) for each
@@ -112,6 +112,53 @@ def test_precomputed_beats_v57_disjoint_plus_leftover_hillclimb():
             assert shipped <= seed_fail3, (loto, num_sets, shipped, seed_fail3)
 
 
+# Best-found fail3 for the 11-15 set entries (拡張プラスモード, v5.9). These are
+# NOT proven optima — they lock the shipped table against regression: any future
+# edit must not raise fail3 above the best structure found so far.
+_BEST_FOUND_FAIL3 = {
+    ("loto6", 11): 4365806,
+    ("loto6", 12): 4223057,
+    ("loto6", 13): 4079965,
+    ("loto6", 14): 3938577,
+    ("loto6", 15): 3809045,
+    ("loto7", 11): 1797292,
+    ("loto7", 12): 1543360,
+    ("loto7", 13): 1299108,
+    ("loto7", 14): 1051869,
+    ("loto7", 15): 831014,
+    ("loto6", 16): 3684920,
+    ("loto6", 17): 3562131,
+    ("loto6", 18): 3446997,
+    ("loto6", 19): 3336190,
+    ("loto6", 20): 3211133,
+    ("loto7", 16): 708921,
+    ("loto7", 17): 616250,
+    ("loto7", 18): 505817,
+    ("loto7", 19): 407876,
+    ("loto7", 20): 345176,
+}
+
+
+@pytest.mark.parametrize("loto,num_sets", sorted(_BEST_FOUND_FAIL3))
+def test_best_found_portfolio_matches_lock(loto, num_sets):
+    sets = _portfolio(loto, num_sets)
+    fail3 = lp._fail_count_under_threshold([tuple(s) for s in sets], loto, 3)
+    assert fail3 == _BEST_FOUND_FAIL3[(loto, num_sets)]
+
+
+def test_any3_strictly_increases_with_num_sets_up_to_cap():
+    """Guaranteed by construction (appending a ticket only shrinks the fail
+    set); guards the 11-15 best-found entries against a bad table edit."""
+    for loto in ("loto6", "loto7"):
+        prev = None
+        for num_sets in range(10, lp.HITPROB_MAX_SETS + 1):
+            fail3 = lp._fail_count_under_threshold(
+                [tuple(s) for s in _portfolio(loto, num_sets)], loto, 3)
+            if prev is not None:
+                assert fail3 < prev, (loto, num_sets, fail3, prev)
+            prev = fail3
+
+
 def test_extended_generation_is_instant():
     """Regression guard: v5.8 replaced the minutes-long runtime hill climb with a
     table lookup, so the slowest extended size must generate well under a second."""
@@ -119,4 +166,6 @@ def test_extended_generation_is_instant():
 
     t0 = time.time()
     lp.generate_hitprob_from_draws([], "loto6", num_sets=10)
+    lp.generate_hitprob_from_draws([], "loto6", num_sets=20)
+    lp.generate_hitprob_from_draws([], "loto7", num_sets=20)
     assert time.time() - t0 < 1.0
