@@ -1,5 +1,5 @@
 """
-ロト6/ロト7 予測スクリプト v5.10
+ロト6/ロト7 予測スクリプト v5.11
 
 設計の前提（重要）:
 - ロト6/7 は独立抽選のため、過去データから「的中率」を改善することは
@@ -8,6 +8,13 @@
 - 改善可能なのは (a) 当選時の配当分配（ev モード）、および
   (b) 5口のうち少なくとも1口が3個以上に届く確率（hitprob モード）。
   どちらも5口合計の期待ヒット数は変えられない（独立試行のため）。
+
+v5.11（2026-07-12）の変更:
+- 隣接する大きい best-found から全1口削除候補を exact 評価し、3ケースを更新。
+  loto7 13口: any3 87.3818%→87.3875%、loto7 17口: 94.0144%→94.0745%、
+  loto6 19口: 45.2765%→45.4375%。
+- 全空間探索の記録がある最小ケース以外を「グローバル最適」と呼ばないよう、
+  best-found の表示と説明を厳密化。
 
 v5.10（2026-07-03）の変更:
 - hitprob 組数上限を 15→20 に拡張（拡張プラスモード第2弾、v5.9 と同じ
@@ -20,12 +27,11 @@ v5.10（2026-07-03）の変更:
   単位→評価単位に修正（15口で約30分、20口で数時間の予算超過を解消）。
 
 v5.9（2026-07-03）の変更:
-- hitprob 組数上限を 10→15 に拡張（拡張プラスモード）。11口以上は excess が
-  次数制約 (<=pick) を超えるためペアのみの重複構造が存在せず（数字を3チケット
-  以上で共有する必要がある）、構造空間の全数探索も届かない。よって多スタート
+- hitprob 組数上限を 10→15 に拡張（拡張プラスモード）。この領域は構造空間の
+  全数探索が現実的でなく、一部ケースではペアのみの重複構造も存在しないため、
+  多スタート
   焼きなましの best-found 構造（_PRECOMPUTED_BEST_FOUND_PORTFOLIOS）を即時参照
-  する。**最適性証明なし**（10口以下は従来どおりグローバル最適）。any3 の組数
-  単調増加は構成的に保証される。
+  する。**最適性証明なし**。any3 の組数単調増加は各格納値の exact DP で検証する。
 - _fail_count_under_threshold を終了チケット周辺化 + 貪欲マスク順序の DP に
   置換（optimize_hitprob_extended.fail_count と同一アルゴリズム）。15口の
   exact 計算が threshold=5 で約45秒 → 数秒に短縮。
@@ -33,9 +39,9 @@ v5.9（2026-07-03）の変更:
 v5.8（2026-06-11）の変更:
 - 拡張 hitprob（完全非重複上限超え）の余剰チケット配置を、v5.7 の実行時
   山登り（局所最適・loto6 10口で約9分）から、オフラインで導出・検証した
-  グローバル最適ポートフォリオの即時参照（_PRECOMPUTED_EXTENDED_PORTFOLIOS）
+  best-found ポートフォリオの即時参照（_PRECOMPUTED_EXTENDED_PORTFOLIOS）
   に置換。any3 確率は各数字の所属チケット集合（重複構造）だけで決まり具体的な
-  数字に依存しないため、固定の最適構造が全抽選に対し厳密最適。
+  数字に依存しないため、固定構造の exact 確率は全抽選で同じ。
 - 最適性の根拠: 最小ケース（loto7 6口・loto6 8口）は構造空間の全数探索で厳密
   最適を確認、他は dense-family 全数探索 + 多スタート焼きなまし/補グラフ探索の
   一致で確認（optimize_hitprob_extended.py）。
@@ -2075,25 +2081,24 @@ def _max_disjoint_sets(loto):
     return (hi - lo + 1) // cfg["pick"]
 
 
-# Up to 10 sets the precomputed structures are proven (or near-proven) global
-# optima; 11-20 sets are best-found structures from multi-start annealing
-# (proof of optimality is out of reach there because pair-only overlap becomes
-# infeasible and the structure space explodes). See the table comments below.
+# The smallest extended cases below have recorded offline exhaustive checks.
+# Other precomputed structures are best-found results from restricted exhaustive
+# searches and multi-start heuristics; they intentionally carry no global-optimality claim.
 HITPROB_MAX_SETS = 20
-HITPROB_PROVEN_OPTIMAL_MAX_SETS = 10
+HITPROB_RECORDED_EXHAUSTIVE_CASES = frozenset({("loto6", 8), ("loto7", 6)})
 
 
-# Globally any3-optimal portfolios for num_sets beyond the fully disjoint maximum
+# Best-known any3 portfolios for num_sets beyond the fully disjoint maximum
 # (loto6: 7, loto7: 5). Beyond that maximum the total slot count num_sets*pick
 # exceeds the pool size, so tickets must overlap; the exact any3 probability then
 # depends ONLY on the inter-ticket overlap structure (which subset of tickets each
 # number belongs to), never on the concrete numbers. These entries are the
-# minimal-fail3 (maximal-any3) overlap structures, derived and verified offline by
+# low-fail3 (high-any3) overlap structures, derived and verified offline by
 # optimize_hitprob_extended.py — full-space exhaustive search for the smallest
 # cases, dense-family exhaustive search plus multi-start annealing/complement
-# search for the rest. The structure is a near-complete overlap graph on the
-# smallest sufficient ticket subset; the concrete numbers below are only spread
-# for readability. Each fail3 is cross-checked against _fail_count_under_threshold.
+# search for the rest. Only the smallest extended cases have recorded offline
+# exhaustive checks. The concrete numbers below are spread for readability.
+# Each fail3 is cross-checked against _fail_count_under_threshold.
 _PRECOMPUTED_EXTENDED_PORTFOLIOS = {
     # fail3=4798122, exact any3=21.2965%
     ('loto6', 8): (
@@ -2189,15 +2194,14 @@ _PRECOMPUTED_EXTENDED_PORTFOLIOS = {
 }
 
 
-# Best-found portfolios for 11-20 sets (拡張プラスモード). Unlike the table
-# above these carry NO optimality proof: pair-only overlap structures are
-# infeasible here (the excess E = num_sets*pick - N exceeds what degree<=pick
-# simple graphs can hold), numbers must be shared by 3+ tickets, and the
-# resulting structure space is beyond exhaustive search. Each entry is the
-# best of multi-start simulated annealing runs (optimize_hitprob_extended.py
-# BEST_PLUS_MASKS + emit_plus), verified against _fail_count_under_threshold.
-# any3 is still guaranteed to increase with num_sets because appending any
-# ticket to a smaller portfolio can only shrink the fail set.
+# Best-found portfolios for 11-20 sets (拡張プラスモード). Like most entries
+# above these carry NO global optimality proof. Some cases require numbers shared by
+# 3+ tickets; even where pair-only overlap is feasible, the resulting structure
+# space is beyond exhaustive search. Entries come from multi-start simulated
+# annealing and, for loto7 13/17口 and loto6 19口, next-size portfolio shrinking
+# (optimize_hitprob_extended.py BEST_PLUS_MASKS + emit_plus), verified against
+# _fail_count_under_threshold. Strict growth across stored sizes is tested by
+# exact DP; the independently optimized portfolios are not nested.
 _PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
     # fail3=4365806, exact any3=28.3878% (best-found)
     ('loto6', 11): (
@@ -2308,21 +2312,21 @@ _PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
         (2, 4, 10, 19, 25, 35, 37),
         (3, 6, 8, 21, 23, 32, 35),
     ),
-    # fail3=1299108, exact any3=87.3818% (best-found)
+    # fail3=1298518, exact any3=87.3875% (best-found)
     ('loto7', 13): (
-        (3, 6, 13, 14, 28, 33, 35),
-        (10, 11, 15, 16, 23, 28, 30),
-        (5, 8, 16, 20, 25, 27, 33),
-        (8, 10, 13, 17, 20, 26, 37),
-        (8, 14, 15, 18, 21, 27, 29),
-        (4, 7, 16, 17, 21, 31, 36),
-        (1, 5, 10, 24, 29, 31, 32),
-        (5, 9, 11, 14, 22, 34, 37),
-        (2, 11, 18, 19, 25, 26, 31),
-        (3, 7, 19, 22, 24, 27, 30),
-        (2, 9, 12, 21, 23, 32, 33),
-        (1, 6, 12, 15, 25, 36, 37),
-        (1, 4, 18, 20, 23, 34, 35),
+        (5, 9, 14, 16, 22, 29, 35),
+        (8, 11, 16, 17, 23, 25, 30),
+        (8, 10, 15, 20, 21, 26, 29),
+        (1, 6, 12, 21, 23, 33, 34),
+        (12, 13, 15, 17, 18, 22, 31),
+        (2, 9, 10, 13, 23, 36, 37),
+        (4, 5, 17, 19, 20, 28, 37),
+        (1, 9, 15, 19, 24, 30, 32),
+        (3, 6, 16, 19, 26, 27, 31),
+        (2, 5, 11, 18, 27, 32, 33),
+        (3, 7, 14, 18, 24, 25, 37),
+        (1, 7, 8, 22, 27, 28, 36),
+        (4, 7, 11, 13, 26, 34, 35),
     ),
     # fail3=1051869, exact any3=89.7832% (best-found)
     ('loto7', 14): (
@@ -2419,27 +2423,27 @@ _PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
         (2, 8, 23, 25, 29, 38),
         (5, 18, 21, 26, 29, 30),
     ),
-    # fail3=3336190, exact any3=45.2765% (best-found)
+    # fail3=3326378, exact any3=45.4375% (best-found)
     ('loto6', 19): (
-        (1, 9, 20, 29, 32, 36),
-        (3, 6, 16, 27, 35, 40),
-        (8, 14, 17, 23, 31, 34),
-        (5, 13, 18, 19, 34, 35),
-        (1, 10, 16, 25, 38, 39),
-        (2, 4, 23, 28, 33, 37),
-        (5, 6, 11, 24, 36, 43),
-        (10, 17, 21, 22, 28, 29),
-        (11, 14, 18, 25, 26, 33),
-        (11, 16, 19, 20, 28, 31),
-        (1, 8, 19, 22, 37, 40),
-        (9, 10, 12, 13, 41, 42),
-        (7, 9, 21, 26, 30, 31),
-        (4, 5, 20, 27, 30, 41),
-        (2, 8, 15, 24, 35, 43),
-        (3, 7, 12, 33, 34, 38),
-        (4, 7, 17, 26, 32, 39),
-        (2, 11, 22, 27, 29, 39),
-        (5, 14, 15, 21, 32, 42),
+        (2, 6, 23, 27, 29, 36),
+        (4, 8, 21, 26, 32, 33),
+        (9, 13, 14, 22, 27, 38),
+        (7, 11, 20, 21, 24, 40),
+        (7, 16, 22, 25, 26, 29),
+        (5, 6, 15, 28, 30, 39),
+        (9, 10, 15, 22, 31, 40),
+        (6, 12, 18, 19, 26, 43),
+        (8, 12, 17, 25, 30, 31),
+        (12, 14, 15, 20, 29, 35),
+        (1, 4, 5, 36, 38, 41),
+        (1, 16, 19, 27, 28, 34),
+        (3, 14, 17, 18, 33, 40),
+        (2, 5, 24, 25, 32, 37),
+        (4, 11, 18, 23, 34, 37),
+        (2, 7, 13, 18, 41, 42),
+        (3, 10, 23, 24, 26, 39),
+        (3, 8, 9, 20, 42, 43),
+        (11, 13, 16, 17, 32, 35),
     ),
     # fail3=3211133, exact any3=47.3279% (best-found)
     ('loto6', 20): (
@@ -2483,25 +2487,25 @@ _PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
         (2, 3, 16, 18, 27, 32, 35),
         (3, 6, 10, 22, 23, 36, 37),
     ),
-    # fail3=616250, exact any3=94.0144% (best-found)
+    # fail3=610060, exact any3=94.0745% (best-found)
     ('loto7', 17): (
-        (7, 9, 10, 19, 22, 31, 32),
-        (1, 6, 11, 19, 23, 34, 36),
-        (1, 3, 16, 20, 27, 30, 33),
-        (5, 11, 15, 22, 25, 26, 28),
-        (1, 6, 15, 18, 24, 32, 37),
-        (7, 12, 16, 21, 23, 26, 29),
-        (1, 12, 17, 21, 22, 27, 32),
-        (8, 9, 11, 13, 24, 29, 36),
-        (7, 12, 13, 18, 20, 28, 34),
-        (5, 9, 14, 16, 17, 34, 35),
-        (4, 8, 10, 14, 23, 33, 37),
-        (8, 10, 15, 17, 26, 27, 31),
-        (5, 10, 16, 18, 21, 25, 36),
-        (2, 4, 13, 19, 26, 33, 35),
-        (2, 7, 17, 23, 24, 28, 30),
-        (3, 4, 6, 21, 30, 31, 35),
-        (2, 3, 14, 20, 25, 29, 37),
+        (9, 12, 15, 16, 19, 26, 33),
+        (7, 10, 12, 19, 22, 25, 35),
+        (6, 8, 10, 15, 22, 34, 36),
+        (3, 10, 14, 17, 24, 29, 32),
+        (3, 11, 13, 20, 23, 26, 32),
+        (5, 9, 11, 22, 24, 27, 30),
+        (1, 12, 17, 18, 23, 26, 27),
+        (5, 6, 15, 18, 25, 28, 32),
+        (2, 3, 7, 18, 30, 31, 36),
+        (4, 6, 13, 14, 27, 31, 35),
+        (4, 9, 10, 21, 23, 28, 31),
+        (5, 8, 14, 19, 21, 30, 33),
+        (4, 11, 16, 17, 21, 25, 36),
+        (1, 6, 7, 20, 24, 33, 37),
+        (1, 5, 13, 16, 28, 29, 34),
+        (2, 4, 8, 19, 29, 31, 37),
+        (2, 9, 14, 15, 20, 34, 35),
     ),
     # fail3=505817, exact any3=95.0870% (best-found)
     ('loto7', 18): (
@@ -2573,13 +2577,13 @@ _PRECOMPUTED_BEST_FOUND_PORTFOLIOS = {
 
 
 def _extended_hitprob_portfolio_nums(loto, num_sets):
-    """Globally any3-optimal portfolio for num_sets beyond the disjoint maximum.
+    """Best-known any3 portfolio beyond the disjoint maximum.
 
-    Returns the precomputed optimum from _PRECOMPUTED_EXTENDED_PORTFOLIOS:
+    Returns a precomputed structure from _PRECOMPUTED_EXTENDED_PORTFOLIOS:
     history-independent, deterministic, and instant. This replaces the v5.7
-    runtime hill climb, which only reached a local optimum and took minutes for
+    runtime hill climb, which only reached a weaker local result and took minutes for
     the larger sizes (loto6 10口 ≈ 9 min). The any3 probability is invariant
-    under the concrete numbers, so a fixed optimal structure is exact for every
+    under the concrete numbers, so a fixed structure's probability is exact for every
     draw.
     """
     max_d = _max_disjoint_sets(loto)
@@ -2587,7 +2591,7 @@ def _extended_hitprob_portfolio_nums(loto, num_sets):
     if num_sets > HITPROB_MAX_SETS:
         raise ValueError(
             f"hitprob の組数上限は {HITPROB_MAX_SETS} です"
-            f"（21口以上の最適構造は未導出）"
+            f"（21口以上の検証済み構造は未導出）"
         )
     key = (loto, num_sets)
     if key in _PRECOMPUTED_EXTENDED_PORTFOLIOS:
@@ -2639,8 +2643,9 @@ def generate_hitprob_from_draws(draws, loto, num_sets=5, params_map=None, portfo
     History-independent. The result depends only on (loto, num_sets). `draws`,
     params_map, portfolio_map, and seed are accepted for signature compatibility.
     Up to the disjoint maximum (loto6: 7, loto7: 5) the portfolio is fully
-    disjoint; beyond it, the globally any3-optimal overlap structure is read from
-    _PRECOMPUTED_EXTENDED_PORTFOLIOS (10口まで・最適証明あり)、11口以上は
+    disjoint; beyond it, the best-known any3 overlap structure is read from
+    _PRECOMPUTED_EXTENDED_PORTFOLIOS
+    (最小ケースのみオフライン全数探索の記録あり)、11口以上は
     _PRECOMPUTED_BEST_FOUND_PORTFOLIOS (best-found、HITPROB_MAX_SETS が上限).
 
     Honest caveat: expected total hits is invariant for independent lottery
@@ -2901,12 +2906,17 @@ def run_hitprob(draws, loto, num_sets=5, method="exact", trials=100000):
     label_method = "exact DP" if est["method"] == "exact-dp" else "Monte Carlo"
     if est["max_pair_overlap"] == 0:
         style = "完全非重複ポートフォリオ"
-    elif num_sets <= HITPROB_PROVEN_OPTIMAL_MAX_SETS:
-        style = "重複最小ポートフォリオ（完全非重複上限超え、グローバル最適）"
+    elif (loto, num_sets) in HITPROB_RECORDED_EXHAUSTIVE_CASES:
+        style = "重複最小ポートフォリオ（オフライン全構造探索で確認した記録あり）"
+    elif num_sets <= 10:
+        style = (
+            "重複最小ポートフォリオ（高密度構造探索＋多スタート一致の"
+            "best-found 構造・全空間の最適性証明なし）"
+        )
     else:
         style = (
             "重複最小ポートフォリオ（11口以上・拡張プラスモード、"
-            "焼きなまし多スタートの best-found 構造・最適性証明なし）"
+            "多スタート／一部は隣接組数縮約の best-found 構造・最適性証明なし）"
         )
     print(f"期間: 第{draws[-1].number}回〜第{draws[0].number}回（{len(draws)}回分）")
     print(f"【戦略】命中率特化（coverage-first / 履歴非依存、{style}）")

@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import loto_predictor_chatgpt as lp
+import optimize_hitprob_extended as opt
 
 
 def _portfolio(loto, num_sets):
@@ -58,11 +59,11 @@ def test_hitprob_rejects_more_than_extended_cap():
         lp.generate_hitprob_from_draws([], "loto6", num_sets=21)
 
 
-# Globally optimal fail3 (count of draws where no ticket reaches 3 hits) for each
+# Best-known fail3 (count of draws where no ticket reaches 3 hits) for each
 # extended portfolio, derived and verified offline by optimize_hitprob_extended.py.
-# Lower is better. These lock the v5.8 precomputed table against regression: any
-# future edit to a portfolio must not raise fail3 above the proven optimum.
-_OPTIMAL_FAIL3 = {
+# The smallest two cases have recorded offline exhaustive checks; the rest are
+# best-found.
+_BEST_KNOWN_FAIL3 = {
     ("loto6", 8): 4798122,
     ("loto6", 9): 4653802,
     ("loto6", 10): 4509695,
@@ -74,15 +75,15 @@ _OPTIMAL_FAIL3 = {
 }
 
 
-@pytest.mark.parametrize("loto,num_sets", sorted(_OPTIMAL_FAIL3))
-def test_precomputed_portfolio_is_globally_optimal(loto, num_sets):
+@pytest.mark.parametrize("loto,num_sets", sorted(_BEST_KNOWN_FAIL3))
+def test_precomputed_portfolio_matches_best_known_lock(loto, num_sets):
     sets = _portfolio(loto, num_sets)
     fail3 = lp._fail_count_under_threshold([tuple(s) for s in sets], loto, 3)
-    assert fail3 == _OPTIMAL_FAIL3[(loto, num_sets)]
+    assert fail3 == _BEST_KNOWN_FAIL3[(loto, num_sets)]
 
 
 def test_precomputed_beats_v57_disjoint_plus_leftover_hillclimb():
-    """The precomputed optimum must be no worse than the old local-optimum seed.
+    """The precomputed result must be no worse than the old local-search seed.
 
     Reconstructs the v5.7 starting portfolio (disjoint base + leftover-filled
     extras, no climb) and checks the shipped table reaches at least its any3.
@@ -123,16 +124,16 @@ _BEST_FOUND_FAIL3 = {
     ("loto6", 15): 3809045,
     ("loto7", 11): 1797292,
     ("loto7", 12): 1543360,
-    ("loto7", 13): 1299108,
+    ("loto7", 13): 1298518,
     ("loto7", 14): 1051869,
     ("loto7", 15): 831014,
     ("loto6", 16): 3684920,
     ("loto6", 17): 3562131,
     ("loto6", 18): 3446997,
-    ("loto6", 19): 3336190,
+    ("loto6", 19): 3326378,
     ("loto6", 20): 3211133,
     ("loto7", 16): 708921,
-    ("loto7", 17): 616250,
+    ("loto7", 17): 610060,
     ("loto7", 18): 505817,
     ("loto7", 19): 407876,
     ("loto7", 20): 345176,
@@ -146,9 +147,38 @@ def test_best_found_portfolio_matches_lock(loto, num_sets):
     assert fail3 == _BEST_FOUND_FAIL3[(loto, num_sets)]
 
 
+@pytest.mark.parametrize(
+    "loto,num_sets,removed,old_fail3",
+    [
+        ("loto7", 13, 12, 1299108),
+        ("loto7", 17, 5, 616250),
+        ("loto6", 19, 7, 3336190),
+    ],
+)
+def test_shrunk_next_size_source_matches_updated_mask_table(
+    loto, num_sets, removed, old_fail3,
+):
+    source = _portfolio(loto, num_sets + 1)
+    candidate = source[:removed] + source[removed + 1:]
+    fail3 = lp._fail_count_under_threshold(candidate, loto, 3)
+
+    assert opt.portfolio_to_masks(candidate) == opt.BEST_PLUS_MASKS[(loto, num_sets)]
+    assert fail3 == _BEST_FOUND_FAIL3[(loto, num_sets)]
+    assert fail3 < old_fail3
+
+
+def test_shrink_next_portfolio_finds_best_loto7_thirteen_set_candidate():
+    fail3, candidate, removed = opt.shrink_next_portfolio(
+        "loto7", 13, verbose=False,
+    )
+
+    assert removed == 12
+    assert fail3 == _BEST_FOUND_FAIL3[("loto7", 13)]
+    assert opt.portfolio_to_masks(candidate) == opt.BEST_PLUS_MASKS[("loto7", 13)]
+
+
 def test_any3_strictly_increases_with_num_sets_up_to_cap():
-    """Guaranteed by construction (appending a ticket only shrinks the fail
-    set); guards the 11-15 best-found entries against a bad table edit."""
+    """Guard independently optimized best-found entries against regression."""
     for loto in ("loto6", "loto7"):
         prev = None
         for num_sets in range(10, lp.HITPROB_MAX_SETS + 1):
