@@ -31,7 +31,19 @@
   python3 optimize_hitprob_extended.py emit-plus
       （11-20口の best-found 構造 BEST_PLUS_MASKS から
         _PRECOMPUTED_BEST_FOUND_PORTFOLIOS を再構築・検証・出力する。
-        v5.9-v5.11。全空間の最適性証明なし）
+        v5.9-v5.12。全空間の最適性証明なし）
+  python3 optimize_hitprob_extended.py retune <loto> <num_sets> [budget_s] [starts]
+      （v5.12。共通乱数 MC で広く探索し差分 exact polish で仕上げる。
+        採用条件は fail3 の厳密改善かつ loto7 は exact 入賞確率の非悪化。
+        best-found は最適性証明がないので、回すたびに改善しうる）
+  python3 optimize_hitprob_extended.py prize-prob <loto> <num_sets>
+      （格納済み構造の exact 入賞確率。loto7 は本数字>=3 かつ 本数字+ボーナス>=4、
+        loto6 は入賞 <=> any3）
+
+⚠ retune / prize-prob / polish_swap_exact / exact_prize_prob は **numpy>=2.0 が必要**
+  （`np.bitwise_count` は numpy 2.0 で追加された。関数内 import なので、
+    本番の loto_predictor_chatgpt は numpy 非依存のまま）。
+  無い環境では `uv run --with 'numpy>=2.0' python3 optimize_hitprob_extended.py ...`。
 """
 import json
 import math
@@ -423,23 +435,23 @@ BEST_PLUS_MASKS = {
     ('loto6', 11): {1: 5, 6: 1, 8: 6, 18: 1, 20: 1, 34: 1, 36: 1, 48: 1, 66: 1, 68: 1, 80: 1, 96: 1, 128: 4, 129: 1, 258: 1, 260: 1, 272: 1, 288: 1, 320: 1, 512: 5, 640: 1, 1026: 1, 1028: 1, 1040: 1, 1056: 1, 1088: 1, 1280: 1},
     ('loto6', 12): {2: 3, 4: 1, 5: 1, 8: 2, 10: 1, 16: 3, 24: 1, 32: 2, 34: 1, 40: 1, 48: 1, 65: 1, 68: 1, 129: 1, 132: 1, 192: 1, 256: 2, 258: 1, 264: 1, 272: 1, 288: 1, 512: 1, 513: 1, 576: 1, 640: 1, 1025: 1, 1028: 1, 1088: 1, 1152: 1, 1536: 1, 2049: 1, 2052: 1, 2112: 1, 2176: 1, 2560: 1, 3072: 1},
     ('loto6', 13): {1: 1, 2: 1, 3: 1, 8: 2, 9: 1, 10: 1, 20: 1, 36: 1, 48: 1, 68: 1, 80: 1, 96: 1, 128: 2, 129: 1, 130: 1, 260: 1, 272: 1, 288: 1, 320: 1, 512: 1, 513: 1, 514: 1, 520: 1, 640: 1, 1024: 1, 1025: 1, 1026: 1, 1032: 1, 1152: 1, 1536: 1, 2052: 1, 2064: 1, 2080: 1, 2112: 1, 2304: 1, 4100: 1, 4112: 1, 4128: 1, 4160: 1, 4352: 1, 6144: 1},
-    ('loto6', 14): {1: 1, 5: 1, 8: 1, 9: 1, 12: 1, 17: 1, 20: 1, 33: 1, 36: 1, 48: 1, 66: 1, 130: 1, 192: 1, 257: 1, 260: 1, 264: 1, 272: 1, 288: 1, 514: 1, 528: 1, 544: 1, 640: 1, 1026: 1, 1056: 1, 1088: 1, 1152: 1, 1536: 1, 2052: 1, 2056: 1, 2064: 1, 2112: 1, 2304: 1, 4098: 1, 4160: 1, 4224: 1, 4608: 1, 5120: 1, 8194: 1, 8200: 1, 8256: 1, 8320: 1, 10240: 1, 12288: 1},
-    ('loto6', 15): {5: 1, 9: 1, 10: 1, 17: 1, 18: 1, 20: 1, 33: 1, 34: 1, 56: 1, 132: 1, 160: 1, 192: 1, 320: 1, 513: 1, 516: 1, 520: 1, 640: 1, 768: 1, 1026: 1, 1040: 1, 1280: 1, 2052: 1, 2112: 1, 2432: 1, 2560: 1, 3072: 1, 4104: 1, 4128: 1, 4160: 1, 4354: 1, 5120: 1, 8194: 1, 8200: 1, 8256: 1, 8448: 1, 9216: 1, 12304: 1, 16385: 1, 16388: 1, 16416: 1, 16448: 1, 16512: 1, 18432: 1},
+    ('loto6', 14): {5: 1, 8: 1, 9: 1, 12: 1, 17: 1, 20: 1, 24: 1, 32: 1, 33: 1, 36: 1, 48: 1, 66: 1, 130: 1, 192: 1, 257: 1, 260: 1, 264: 1, 272: 1, 288: 1, 514: 1, 576: 1, 640: 1, 1026: 1, 1088: 1, 1152: 1, 1536: 1, 2049: 1, 2052: 1, 2056: 1, 2064: 1, 2080: 1, 2304: 1, 4098: 1, 4160: 1, 4224: 1, 4608: 1, 5120: 1, 8194: 1, 8256: 1, 8320: 1, 8704: 1, 9216: 1, 12288: 1},
+    ('loto6', 15): {5: 1, 9: 1, 10: 1, 17: 1, 18: 1, 33: 1, 34: 1, 52: 1, 132: 1, 160: 1, 192: 1, 280: 1, 320: 1, 513: 1, 516: 1, 520: 1, 640: 1, 768: 1, 1026: 1, 1040: 1, 1280: 1, 2052: 1, 2112: 1, 2176: 1, 2560: 1, 3072: 1, 4104: 1, 4128: 1, 4160: 1, 4354: 1, 5120: 1, 8194: 1, 8200: 1, 8256: 1, 8448: 1, 9216: 1, 12304: 1, 16385: 1, 16388: 1, 16416: 1, 16448: 1, 16512: 1, 18432: 1},
     ('loto7', 11): {9: 1, 10: 1, 18: 1, 21: 1, 24: 1, 33: 1, 34: 1, 36: 1, 48: 1, 65: 1, 66: 1, 68: 1, 72: 1, 130: 1, 132: 1, 136: 1, 144: 1, 160: 1, 257: 1, 260: 1, 272: 1, 288: 1, 320: 1, 384: 1, 518: 1, 520: 1, 544: 1, 576: 1, 641: 1, 768: 1, 1025: 1, 1026: 1, 1028: 1, 1032: 1, 1040: 1, 1088: 1, 1536: 1},
-    ('loto7', 12): {3: 1, 5: 1, 17: 1, 24: 1, 33: 1, 40: 1, 48: 1, 65: 1, 66: 1, 68: 1, 130: 1, 132: 1, 136: 1, 144: 1, 257: 1, 268: 1, 272: 1, 290: 1, 320: 1, 514: 1, 516: 1, 520: 1, 576: 1, 672: 1, 1032: 1, 1042: 1, 1060: 1, 1088: 1, 1153: 1, 1792: 1, 2054: 1, 2056: 1, 2064: 1, 2144: 1, 2432: 1, 2560: 1, 3072: 1},
-    ('loto7', 13): {5: 1, 12: 1, 24: 1, 36: 1, 42: 1, 68: 1, 82: 1, 130: 1, 148: 1, 161: 1, 259: 1, 264: 1, 272: 1, 448: 1, 520: 1, 544: 1, 577: 1, 640: 1, 1025: 1, 1026: 1, 1120: 1, 1152: 1, 1280: 1, 1552: 1, 2054: 1, 2065: 1, 2080: 1, 2112: 1, 2184: 1, 2816: 1, 4097: 1, 4104: 1, 4144: 1, 4160: 1, 4356: 1, 4610: 1, 7168: 1},
-    ('loto7', 14): {12: 1, 24: 1, 36: 1, 42: 1, 68: 1, 82: 1, 148: 1, 161: 1, 259: 1, 264: 1, 448: 1, 520: 1, 577: 1, 640: 1, 1025: 1, 1120: 1, 1152: 1, 1280: 1, 1552: 1, 2054: 1, 2065: 1, 2080: 1, 2184: 1, 2816: 1, 4101: 1, 4226: 1, 4368: 1, 4640: 1, 5122: 1, 6208: 1, 8193: 1, 8240: 1, 8256: 1, 8452: 1, 8706: 1, 11264: 1, 12296: 1},
-    ('loto7', 15): {3: 1, 26: 1, 81: 1, 100: 1, 168: 1, 296: 1, 388: 1, 514: 1, 517: 1, 584: 1, 656: 1, 1025: 1, 1072: 1, 1090: 1, 1792: 1, 2060: 1, 2082: 1, 2240: 1, 2320: 1, 4102: 1, 4225: 1, 4640: 1, 5128: 1, 6400: 1, 8212: 1, 8224: 1, 8512: 1, 9344: 1, 10241: 1, 12352: 1, 16388: 1, 16514: 1, 16641: 1, 17408: 1, 18944: 1, 20496: 1, 24584: 1},
-    ('loto6', 16): {6: 1, 25: 1, 33: 1, 48: 1, 66: 1, 129: 1, 160: 1, 258: 1, 260: 1, 384: 1, 516: 1, 520: 1, 528: 1, 608: 1, 640: 1, 1089: 1, 1160: 1, 1280: 1, 2049: 1, 2088: 1, 2128: 1, 2176: 1, 3074: 1, 4108: 1, 4112: 1, 4128: 1, 4352: 1, 8196: 1, 8208: 1, 8264: 1, 8704: 1, 12288: 1, 16385: 1, 16386: 1, 16448: 1, 17408: 1, 26624: 1, 32770: 1, 32772: 1, 33024: 1, 33792: 1, 36864: 1, 49152: 1},
-    ('loto6', 17): {3: 1, 9: 1, 42: 1, 129: 1, 132: 1, 192: 1, 257: 1, 264: 1, 322: 1, 520: 1, 528: 1, 1040: 1, 1056: 1, 1152: 1, 1284: 1, 2050: 1, 2112: 1, 4256: 1, 4608: 1, 5122: 1, 6144: 1, 8193: 1, 8198: 1, 8240: 1, 8576: 1, 16385: 1, 16392: 1, 16420: 1, 16448: 1, 16896: 1, 18448: 1, 32776: 1, 32784: 1, 32836: 1, 34848: 1, 36864: 1, 41472: 1, 65552: 1, 65600: 1, 65792: 1, 68096: 1, 69636: 1, 74752: 1},
-    ('loto6', 18): {25: 1, 36: 1, 65: 1, 66: 1, 192: 1, 256: 1, 257: 1, 268: 1, 513: 1, 1028: 1, 1032: 1, 1152: 1, 1538: 1, 2050: 1, 3104: 1, 4114: 1, 4352: 1, 4736: 1, 8193: 1, 8208: 1, 8480: 1, 10244: 1, 12288: 1, 16480: 1, 16516: 1, 17408: 1, 18448: 1, 32784: 1, 32800: 1, 32896: 1, 33288: 1, 36928: 1, 65539: 1, 66080: 1, 69640: 1, 82432: 1, 100352: 1, 131078: 1, 131456: 1, 133120: 1, 139328: 1, 147464: 1, 196624: 1},
-    ('loto6', 19): {10: 1, 84: 1, 161: 1, 288: 1, 320: 1, 529: 1, 608: 1, 896: 1, 1025: 1, 1028: 1, 2053: 1, 2080: 1, 2176: 1, 3072: 1, 4098: 1, 4168: 1, 4612: 1, 8464: 1, 9248: 1, 17410: 1, 18432: 1, 24576: 1, 32792: 1, 33792: 1, 40961: 1, 53376: 1, 65568: 1, 65600: 1, 65682: 1, 73736: 1, 81921: 1, 131140: 1, 131200: 1, 131330: 1, 131592: 1, 163840: 1, 200704: 1, 262656: 1, 264208: 1, 266496: 1, 270338: 1, 278536: 1, 294916: 1},
-    ('loto6', 20): {10: 1, 84: 1, 289: 1, 544: 1, 576: 1, 1041: 1, 1120: 1, 1792: 1, 2049: 1, 2052: 1, 4101: 1, 4128: 1, 4480: 1, 6144: 1, 8264: 1, 8322: 1, 9220: 1, 16912: 1, 18464: 1, 34818: 1, 36864: 1, 49280: 1, 65560: 1, 67584: 1, 81921: 1, 106752: 1, 131136: 1, 131232: 1, 131346: 1, 147464: 1, 163841: 1, 262212: 1, 262400: 1, 262658: 1, 263304: 1, 327680: 1, 401408: 1, 525440: 1, 528400: 1, 532992: 1, 540674: 1, 557064: 1, 589828: 1},
-    ('loto7', 16): {37: 1, 40: 1, 67: 1, 88: 1, 416: 1, 524: 1, 608: 1, 1044: 1, 1232: 1, 1282: 1, 1537: 1, 2058: 1, 2113: 1, 2240: 1, 2816: 1, 4144: 1, 4225: 1, 4354: 1, 8322: 1, 8324: 1, 8464: 1, 8705: 1, 9224: 1, 10272: 1, 16644: 1, 16648: 1, 16914: 1, 19456: 1, 20484: 1, 20512: 1, 32777: 1, 32836: 1, 33408: 1, 34832: 1, 37888: 1, 45056: 1, 49154: 1},
-    ('loto7', 17): {38: 1, 67: 1, 81: 1, 152: 1, 280: 1, 448: 1, 608: 1, 1038: 1, 1104: 1, 2336: 1, 4144: 1, 4168: 1, 4226: 1, 4356: 1, 7168: 1, 8232: 1, 8450: 1, 8836: 1, 10241: 1, 16912: 1, 17536: 1, 18592: 1, 20481: 1, 24640: 1, 34560: 1, 34819: 1, 34820: 1, 38400: 1, 40960: 1, 49160: 1, 65669: 1, 66050: 1, 66593: 1, 68104: 1, 73744: 1, 81924: 1, 98560: 1},
-    ('loto7', 18): {102: 1, 131: 1, 145: 1, 280: 1, 536: 1, 896: 1, 1216: 1, 2062: 1, 2192: 1, 4672: 1, 8272: 1, 8328: 1, 8482: 1, 8708: 1, 14368: 1, 16456: 1, 16898: 1, 17668: 1, 20513: 1, 33808: 1, 35104: 1, 37184: 1, 40961: 1, 49280: 1, 69120: 1, 69635: 1, 69636: 1, 76800: 1, 81952: 1, 98312: 1, 131333: 1, 132098: 1, 133185: 1, 136200: 1, 147472: 1, 163844: 1, 197152: 1},
-    ('loto7', 19): {102: 1, 673: 1, 1136: 1, 2058: 1, 2069: 1, 2336: 1, 2624: 1, 4242: 1, 7168: 1, 8472: 1, 9728: 1, 12293: 1, 16705: 1, 17540: 1, 32777: 1, 32960: 1, 33296: 1, 34052: 1, 40992: 1, 51200: 1, 66306: 1, 66569: 1, 69664: 1, 73800: 1, 131280: 1, 139266: 1, 147968: 1, 168192: 1, 197760: 1, 200708: 1, 262668: 1, 264576: 1, 278530: 2, 282632: 1, 335888: 1, 393249: 1},
-    ('loto7', 20): {387: 1, 1096: 1, 1568: 1, 2160: 1, 3204: 1, 4146: 1, 4614: 1, 8213: 1, 8328: 1, 16548: 1, 18952: 1, 25856: 1, 37952: 1, 43010: 1, 49218: 1, 65728: 1, 65832: 1, 76288: 1, 77825: 1, 81953: 1, 98312: 1, 131137: 1, 131593: 1, 139536: 1, 263040: 1, 264272: 1, 266252: 1, 311312: 1, 394242: 1, 425988: 1, 525313: 1, 528644: 1, 557328: 1, 590338: 1, 659584: 1, 673792: 1, 786464: 1},
+    ('loto7', 12): {3: 1, 5: 1, 12: 1, 24: 1, 34: 1, 40: 1, 52: 1, 65: 1, 66: 1, 80: 1, 130: 1, 132: 1, 136: 1, 145: 1, 257: 1, 258: 1, 272: 1, 288: 1, 320: 1, 514: 1, 516: 1, 520: 1, 545: 1, 704: 1, 1028: 1, 1032: 1, 1042: 1, 1120: 1, 1152: 1, 1792: 1, 2052: 1, 2056: 1, 2112: 1, 2208: 1, 2304: 1, 2576: 1, 3073: 1},
+    ('loto7', 13): {9: 1, 10: 1, 18: 1, 20: 1, 38: 1, 65: 1, 72: 1, 96: 1, 132: 1, 145: 1, 160: 1, 259: 1, 264: 1, 272: 1, 448: 1, 516: 1, 544: 1, 578: 1, 768: 1, 1028: 1, 1032: 1, 1057: 1, 1104: 1, 1664: 1, 2056: 1, 2096: 1, 2176: 1, 2308: 1, 2561: 1, 3074: 1, 4101: 1, 4104: 1, 4128: 1, 4226: 1, 4624: 1, 5376: 1, 6208: 1},
+    ('loto7', 14): {10: 1, 12: 1, 40: 1, 88: 1, 98: 1, 148: 1, 161: 1, 259: 1, 260: 1, 264: 1, 448: 1, 518: 1, 520: 1, 528: 1, 577: 1, 1025: 1, 1042: 1, 1088: 1, 1312: 1, 2065: 1, 2084: 1, 2184: 1, 2816: 1, 3200: 1, 4101: 1, 4226: 1, 4368: 1, 4640: 1, 5120: 1, 6208: 1, 8193: 1, 8240: 1, 8260: 1, 8832: 1, 9216: 1, 10242: 1, 12288: 1},
+    ('loto7', 15): {12: 1, 26: 1, 34: 1, 81: 1, 129: 1, 160: 1, 288: 1, 322: 1, 518: 1, 545: 1, 704: 1, 776: 1, 1029: 1, 1120: 1, 1296: 1, 2096: 1, 2120: 1, 2308: 1, 3200: 1, 4105: 1, 4164: 1, 4240: 1, 5632: 1, 6146: 1, 8200: 1, 8324: 1, 8720: 1, 9218: 1, 10241: 1, 12544: 1, 16404: 1, 16514: 1, 16641: 1, 17416: 1, 18944: 1, 20512: 1, 24640: 1},
+    ('loto6', 16): {6: 1, 12: 1, 48: 1, 66: 1, 81: 1, 129: 1, 136: 1, 160: 1, 258: 1, 260: 1, 521: 1, 528: 1, 608: 1, 640: 1, 1026: 1, 1028: 1, 1088: 1, 1280: 1, 2064: 1, 2088: 1, 2240: 1, 2560: 1, 4120: 1, 4128: 1, 4352: 1, 6145: 1, 8225: 1, 8264: 1, 8336: 1, 8704: 1, 10240: 1, 12288: 1, 16385: 1, 16386: 1, 16388: 1, 16640: 1, 17408: 1, 32770: 1, 32772: 1, 33024: 1, 33792: 1, 36864: 1, 49152: 1},
+    ('loto6', 17): {3: 1, 9: 1, 65: 1, 72: 1, 129: 1, 164: 1, 192: 1, 257: 1, 258: 1, 260: 1, 264: 1, 320: 1, 384: 1, 520: 1, 532: 1, 1040: 1, 1058: 1, 1152: 1, 2050: 1, 4226: 1, 4640: 1, 5120: 1, 6160: 1, 8194: 1, 8240: 1, 8704: 1, 10244: 1, 16385: 1, 16392: 1, 16400: 1, 16448: 1, 18432: 1, 32776: 1, 33796: 1, 34848: 1, 45056: 1, 49664: 1, 65568: 1, 65600: 1, 68096: 1, 69636: 1, 74752: 1, 98320: 1},
+    ('loto6', 18): {36: 1, 49: 1, 70: 1, 138: 1, 148: 1, 224: 1, 274: 1, 288: 1, 776: 1, 1025: 1, 1536: 1, 2049: 1, 2064: 1, 3072: 1, 4672: 1, 5120: 1, 6144: 1, 8204: 1, 8224: 1, 8512: 1, 8832: 1, 16464: 1, 16768: 1, 16900: 1, 20488: 1, 24578: 1, 32840: 1, 32897: 1, 33028: 1, 33282: 1, 40976: 1, 49184: 1, 65537: 1, 65544: 1, 66560: 1, 67584: 1, 69632: 1, 131073: 1, 131074: 1, 132096: 1, 133120: 1, 135168: 1, 196608: 1},
+    ('loto6', 19): {3: 1, 33: 1, 34: 1, 100: 1, 140: 1, 280: 1, 552: 1, 704: 1, 1153: 1, 1792: 1, 2128: 1, 2208: 1, 2564: 1, 4098: 1, 5184: 1, 8194: 1, 8197: 1, 8224: 1, 10248: 1, 16386: 1, 16640: 1, 20496: 1, 24576: 1, 33808: 1, 37120: 1, 49160: 1, 65537: 1, 65538: 1, 65792: 1, 73728: 1, 81920: 1, 98304: 1, 131137: 1, 131600: 1, 132100: 1, 135296: 1, 165888: 1, 262216: 1, 262288: 1, 265216: 1, 266752: 1, 294916: 1, 393472: 1},
+    ('loto6', 20): {82: 1, 134: 1, 160: 1, 257: 1, 296: 1, 384: 1, 1536: 1, 2056: 1, 2177: 1, 2304: 1, 4144: 1, 4352: 1, 5128: 1, 6144: 1, 8328: 1, 10242: 1, 16912: 1, 17440: 1, 20544: 1, 24580: 1, 33284: 1, 33808: 1, 40961: 1, 65556: 1, 66050: 1, 66624: 1, 114688: 1, 131081: 1, 131168: 1, 131328: 1, 133124: 1, 135296: 1, 262149: 1, 262720: 1, 294914: 1, 335872: 1, 393232: 1, 524291: 1, 532992: 1, 540680: 1, 557120: 1, 589856: 1, 787456: 1},
+    ('loto7', 16): {52: 1, 67: 1, 152: 1, 324: 1, 385: 1, 518: 1, 552: 1, 784: 1, 1029: 1, 1282: 1, 1600: 1, 2120: 1, 2180: 1, 2336: 1, 2561: 1, 4106: 1, 4164: 1, 4256: 1, 5136: 1, 8226: 1, 8384: 1, 8456: 1, 11264: 1, 12289: 1, 16393: 1, 17024: 1, 17440: 1, 18450: 1, 20736: 1, 24592: 1, 32785: 1, 32864: 1, 32898: 1, 33800: 1, 38912: 1, 41472: 1, 49156: 1},
+    ('loto7', 17): {38: 1, 69: 1, 74: 1, 273: 1, 448: 1, 776: 1, 1104: 1, 1164: 1, 1569: 1, 2072: 1, 2336: 1, 4144: 1, 4226: 1, 4356: 1, 7680: 1, 8232: 1, 8450: 1, 8836: 1, 10241: 1, 16912: 1, 17410: 1, 18560: 1, 20481: 1, 24640: 1, 32786: 1, 32897: 1, 33376: 1, 34820: 1, 46080: 1, 49160: 1, 65696: 1, 66051: 1, 67648: 1, 69640: 1, 73744: 1, 81924: 1, 99584: 1},
+    ('loto7', 18): {102: 1, 131: 1, 281: 1, 561: 1, 1036: 1, 1248: 1, 2436: 1, 4240: 1, 4928: 1, 6154: 1, 8272: 1, 8450: 1, 9217: 1, 10756: 1, 12320: 1, 16456: 1, 17664: 1, 18946: 1, 20481: 1, 32773: 1, 33056: 1, 35856: 1, 40968: 1, 49792: 1, 65554: 1, 65672: 1, 67072: 1, 69636: 1, 84000: 1, 98368: 1, 131624: 1, 132098: 1, 133185: 1, 139392: 1, 147476: 1, 167936: 1, 196864: 1},
+    ('loto7', 19): {102: 1, 673: 1, 1072: 1, 1284: 1, 2059: 1, 2068: 1, 4242: 1, 6720: 1, 8464: 1, 9728: 1, 12293: 1, 16516: 1, 16705: 1, 17410: 1, 32968: 1, 33296: 1, 37120: 1, 40992: 1, 51200: 1, 66306: 1, 66569: 1, 67968: 1, 73800: 1, 86048: 1, 131153: 1, 131368: 1, 136320: 1, 141314: 1, 147968: 1, 229380: 1, 262668: 1, 263232: 1, 264224: 1, 282632: 1, 294915: 1, 327696: 1, 401536: 1},
+    ('loto7', 20): {116: 1, 204: 1, 1409: 1, 2569: 1, 5696: 1, 6402: 1, 8289: 1, 8472: 1, 16546: 1, 20490: 1, 28676: 1, 33328: 1, 33798: 1, 43136: 1, 51201: 1, 66308: 1, 67650: 1, 69665: 1, 82960: 1, 131112: 1, 140288: 1, 147968: 1, 164096: 1, 196736: 1, 262163: 1, 262784: 1, 263176: 1, 299072: 1, 336128: 1, 393232: 1, 527392: 1, 528528: 1, 532994: 1, 540992: 1, 622600: 1, 655365: 1, 788484: 1},
 }
 
 
@@ -498,6 +510,312 @@ def emit_plus_table():
     print("}")
 
 
+# --- v5.12 retune: MC 探索 + 差分 exact polish -------------------------------
+# anneal() は1評価が exact DP（loto7 20口で約1.3秒）なので試行回数を稼げない。
+# 共通乱数モンテカルロ（1評価ミリ秒）で広く探索し、exact の差分評価で仕上げる。
+# numpy はこの導出ツール内でのみ使う（本番の loto_predictor_chatgpt は非依存のまま）。
+
+
+def _ticket_bits(ticket, lo):
+    v = 0
+    for n in ticket:
+        v |= 1 << (n - lo)
+    return v
+
+
+def mc_samples(loto, n, seed):
+    """本数字のみの指示行列 (n, pool)。any3 の近似評価用。"""
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    pool = hi - lo + 1
+    rng = np.random.default_rng(seed)
+    idx = rng.random((n, pool)).argsort(axis=1)[:, :pick]
+    main = np.zeros((n, pool), dtype=np.int16)
+    main[np.arange(n)[:, None], idx] = 1
+    return main
+
+
+def mc_hill_climb(portfolio, loto, budget_s, seed, samples=200_000):
+    """共通乱数 MC で any3 の 1-swap 山登り。近似なので採用前に exact で採点する。
+
+    ⚠ 打ち切りが time.time() ベースなので、**同じ seed でも実行ごとに結果が変わる**
+    （マシン負荷で到達するスイープ数が変わるため）。得られた構造を残したい場合は
+    retune の JSON 出力を保存すること。再現性が要るなら budget_s を十分大きくして
+    収束させるか、スイープ数で打ち切る実装に変える必要がある。
+    """
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    main = mc_samples(loto, samples, seed)
+    rng = np.random.default_rng(seed + 1)
+    port = [list(t) for t in portfolio]
+    m = len(port)
+
+    def cols(p):
+        t = np.zeros((len(p), hi - lo + 1), dtype=np.int16)
+        for i, s in enumerate(p):
+            for n in s:
+                t[i, n - lo] = 1
+        return (main @ t.T) >= 3
+
+    wm = cols(port)
+    cur = float(wm.any(axis=1).mean())
+    start = time.time()
+    while time.time() - start < budget_s:
+        improved = False
+        cnt = wm.sum(axis=1)
+        for i in rng.permutation(m):
+            if time.time() - start > budget_s:
+                break
+            others = (cnt - wm[:, i]) > 0
+            in_t = set(port[i])
+            best_val, best_cand = cur, None
+            for x in sorted(in_t):
+                for y in range(lo, hi + 1):
+                    if y in in_t:
+                        continue
+                    cand = sorted((in_t - {x}) | {y})
+                    hit = main[:, np.array(cand) - lo].sum(axis=1) >= 3
+                    val = float((others | hit).mean())
+                    if val > best_val + 1e-9:
+                        best_val, best_cand = val, cand
+            if best_cand is not None:
+                port[i] = best_cand
+                wm = cols(port)
+                cnt = wm.sum(axis=1)
+                cur = best_val
+                improved = True
+        if not improved:
+            break
+    return [tuple(sorted(t)) for t in port]
+
+
+def _frontier(portfolio, loto):
+    """bad_count<=1 の主数字集合と、その唯一の bad 口 index（bad0 は -1）。"""
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    tb = np.array([_ticket_bits(t, lo) for t in portfolio], dtype=np.int64)
+    m = len(portfolio)
+    keep_bits, keep_bad = [], []
+    it = combinations(range(hi - lo + 1), pick)
+    while True:
+        block = []
+        for _ in range(500_000):
+            nxt = next(it, None)
+            if nxt is None:
+                break
+            block.append(nxt)
+        if not block:
+            break
+        arr = np.array(block, dtype=np.int64)
+        mbits = np.zeros(len(arr), dtype=np.int64)
+        for c in range(pick):
+            mbits |= np.left_shift(np.int64(1), arr[:, c])
+        bad_cnt = np.zeros(len(arr), dtype=np.int8)
+        bad_idx = np.full(len(arr), -1, dtype=np.int8)
+        for i in range(m):
+            isbad = np.bitwise_count(np.bitwise_and(tb[i], mbits)) >= 3
+            bad_cnt += isbad
+            bad_idx = np.where(isbad & (bad_idx == -1), np.int8(i), bad_idx)
+        sel = bad_cnt <= 1
+        keep_bits.append(mbits[sel])
+        keep_bad.append(np.where(bad_cnt[sel] == 0, np.int8(-1), bad_idx[sel]))
+    return np.concatenate(keep_bits), np.concatenate(keep_bad)
+
+
+def polish_swap_exact(portfolio, loto, max_sweeps=10, verbose=False):
+    """差分 exact による 1-swap polish。
+
+    口 i を差し替えたとき fail3 に寄与しうるのは「i を除く全口が fail」の抽選だけなので、
+    その部分集合上の popcount で候補を厳密評価できる。全候補を DP に掛けるより桁違いに速い。
+
+    返り値の converged は「改善なしのスイープで終了した」= 1-swap 局所最適に到達した、の意。
+    max_sweeps に達して打ち切った場合は False で、局所最適とは断定できない。
+    """
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    port = [tuple(sorted(t)) for t in portfolio]
+    m = len(port)
+    cur = lp._fail_count_under_threshold(port, loto, 3)
+    converged = False
+    for sweep in range(max_sweeps):
+        mbits, bad = _frontier(port, loto)
+        improved = False
+        for i in range(m):
+            sub = mbits[(bad == -1) | (bad == i)]
+            in_t = set(port[i])
+            best_val, best_cand = cur, None
+            for x in sorted(in_t):
+                for y in range(lo, hi + 1):
+                    if y in in_t:
+                        continue
+                    cand = tuple(sorted((in_t - {x}) | {y}))
+                    cb = _ticket_bits(cand, lo)
+                    val = int((np.bitwise_count(np.bitwise_and(cb, sub)) <= 2).sum())
+                    if val < best_val:
+                        best_val, best_cand = val, cand
+            if best_cand is not None:
+                port[i] = best_cand
+                cur = best_val
+                improved = True
+                mbits, bad = _frontier(port, loto)
+        if verbose:
+            print(f"    polish sweep {sweep + 1}: fail3={cur:,}", flush=True)
+        if not improved:
+            converged = True
+            break
+    check = lp._fail_count_under_threshold(port, loto, 3)
+    assert check == cur, f"差分評価と production DP が不一致: {cur} vs {check}"
+    return port, cur, converged
+
+
+def exact_prize_prob(portfolio, loto):
+    """「N口中1口以上が入賞」の厳密確率。
+
+    loto6: 入賞 <=> 本数字>=3 なので any3 と同値。
+    loto7: 入賞 <=> a>=3 かつ a+b>=4。主数字集合 M を全列挙し、ボーナスは閉形式で処理する。
+        f(M) = 0                    (max a_i >= 4)
+             = C(rest-u, 2)/C(rest, 2)   (それ以外, u = |∪_{i: a_i=3}(T_i \\ M)|)
+    """
+    lose, denom = exact_prize_lose_count(portfolio, loto)
+    return 1 - lose / denom
+
+
+def exact_prize_lose_count(portfolio, loto):
+    """入賞しない (主数字集合, ボーナス組) の**整数**個数と全体数を返す。
+
+    出荷ゲートの比較は浮動小数だと丸めで順序が入れ替わりうるので、必ずこの整数で行う。
+    """
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    nb = cfg.get("bonus_count", 0)
+    pool = hi - lo + 1
+    rest = pool - pick
+    total = comb(pool, pick)
+    denom_b = comb(rest, nb)
+    if loto == "loto6":
+        # ボーナスは等級判定に不要なので、負けは fail3 通りの M × 全ボーナス
+        return lp._fail_count_under_threshold(portfolio, loto, 3) * denom_b, total * denom_b
+
+    # 以降の分子 avail*(avail-1)//2 は C(avail, 2) で、ボーナス2個を前提にしている。
+    # 分母 denom_b は一般形 comb(rest, nb) なので、nb が 2 以外だと黙って壊れる。
+    assert nb == 2, f"loto7 経路はボーナス2個前提: bonus_count={nb}"
+
+    tb = np.array([_ticket_bits(t, lo) for t in portfolio], dtype=np.int64)
+    m = len(portfolio)
+    lose = 0
+    it = combinations(range(pool), pick)
+    while True:
+        block = []
+        for _ in range(500_000):
+            nxt = next(it, None)
+            if nxt is None:
+                break
+            block.append(nxt)
+        if not block:
+            break
+        arr = np.array(block, dtype=np.int64)
+        mbits = np.zeros(len(arr), dtype=np.int64)
+        for c in range(pick):
+            mbits |= np.left_shift(np.int64(1), arr[:, c])
+        a = np.empty((len(arr), m), dtype=np.int8)
+        for i in range(m):
+            a[:, i] = np.bitwise_count(np.bitwise_and(tb[i], mbits)).astype(np.int8)
+        amax = a.max(axis=1)
+        ubits = np.zeros(len(arr), dtype=np.int64)
+        for i in range(m):
+            ubits |= np.where(a[:, i] == 3, tb[i], np.int64(0))
+        ubits &= ~mbits
+        avail = (rest - np.bitwise_count(ubits)).astype(np.int64)
+        c2 = np.where(avail >= 2, avail * (avail - 1) // 2, np.int64(0))
+        lose += int(np.where(amax >= 4, np.int64(0), c2).sum())
+    return lose, total * denom_b
+
+
+def retune(loto, num_sets, budget_s=150.0, starts=3, seed=20260801, verbose=True):
+    """出荷起点と乱数起点それぞれを MC 探索 -> exact polish に掛け、最良を返す。
+
+    出荷起点を必ず含めるのが重要: 出荷構造が既に exact 1-swap 局所最適なケース
+    （loto7 11口・loto6 11〜13口）では乱数起点が届かず、出荷起点だけが真値を示す。
+    """
+    import numpy as np
+
+    cfg = lp.LOTO_CONFIG[loto]
+    lo, hi = cfg["range"]
+    pick = cfg["pick"]
+    shipped = [tuple(sorted(t)) for t in lp._PRECOMPUTED_BEST_FOUND_PORTFOLIOS[(loto, num_sets)]]
+    f_ship = lp._fail_count_under_threshold(shipped, loto, 3)
+    rng = np.random.default_rng(seed)
+
+    # 出荷起点は MC を挟まず直接 polish する経路も持つ。MC は近似なので出荷のような
+    # 既に良い構造からは逆に離れてしまい、polish で戻りきらないことがある
+    # （loto7 12口は「出荷を直接 polish」が最良だった）。
+    cands = [("shipped+polish", shipped, False), ("shipped+mc+polish", shipped, True)]
+    for k in range(starts):
+        cands.append((f"random#{k + 1}",
+                      [tuple(sorted(int(v) + lo for v in rng.choice(hi - lo + 1, pick, replace=False)))
+                       for _ in range(num_sets)], True))
+    mc_budget = budget_s / max(1, sum(1 for c in cands if c[2]))
+    results = []
+    for tag, start, use_mc in cands:
+        seed_i = int(rng.integers(1 << 30))
+        mc = mc_hill_climb(start, loto, mc_budget, seed_i) if use_mc else start
+        port, f, converged = polish_swap_exact(mc, loto)
+        if verbose:
+            print(f"  {loto} {num_sets}口 {tag}: fail3={f:,}"
+                  f"{'' if converged else ' [polish 未収束: max_sweeps 到達]'}"
+                  f"{'  <<< 出荷より良い' if f < f_ship else ''}", flush=True)
+        results.append((f, port, tag, converged))
+
+    # fail3 昇順に P(win) ゲートを掛け、最初に通ったものを採る。fail3 最小を先に確定して
+    # から P(win) を見ると、ゲートを通る次善候補を取りこぼす。比較は整数で行う。
+    lose_ship, denom = exact_prize_lose_count(shipped, loto)
+    chosen = None
+    for f, port, tag, converged in sorted(results, key=lambda r: r[0]):
+        if f >= f_ship:
+            continue
+        lose_n, _ = exact_prize_lose_count(port, loto)
+        if lose_n <= lose_ship:
+            chosen = (f, port, tag, lose_n, converged)
+            break
+        if verbose:
+            print(f"  {loto} {num_sets}口 {tag}: fail3={f:,} は改善だが "
+                  f"P(win) 悪化のため除外", flush=True)
+
+    if chosen is None:
+        ship_conv = next((c for f, _p, t, c in results
+                          if t == "shipped+polish" and f == f_ship), False)
+        if verbose:
+            print(f"  => {loto} {num_sets}口 据置 fail3 {f_ship:,}  "
+                  f"P(win) {100*(1-lose_ship/denom):.4f}%", flush=True)
+        return {"fail3": f_ship, "shipped_fail3": f_ship,
+                "win": 1 - lose_ship / denom, "shipped_win": 1 - lose_ship / denom,
+                "adopt": False, "source": "shipped", "polish_converged": ship_conv,
+                "portfolio": [list(t) for t in shipped]}
+
+    f_new, port_new, src, lose_n, conv_new = chosen
+    if verbose:
+        print(f"  => {loto} {num_sets}口 採用 fail3 {f_ship:,}->{f_new:,}  "
+              f"P(win) {100*(1-lose_ship/denom):.4f}%->{100*(1-lose_n/denom):.4f}%  [{src}]",
+              flush=True)
+    return {"fail3": f_new, "shipped_fail3": f_ship,
+            "win": 1 - lose_n / denom, "shipped_win": 1 - lose_ship / denom,
+            "adopt": True, "source": src, "polish_converged": conv_new,
+            "portfolio": [list(t) for t in port_new]}
+
+
 def emit_table():
     """Rebuild final portfolios from BEST_EXCESS_EDGES, verify, print literal."""
     print("_PRECOMPUTED_EXTENDED_PORTFOLIOS = {")
@@ -552,6 +870,19 @@ def main():
             "removed_index": removed,
             "portfolio": [list(t) for t in port],
         }))
+    elif cmd == "retune":
+        # retune <loto> <num_sets> [budget_s] [starts]
+        print(json.dumps(retune(
+            sys.argv[2], int(sys.argv[3]),
+            float(sys.argv[4]) if len(sys.argv) > 4 else 150.0,
+            int(sys.argv[5]) if len(sys.argv) > 5 else 3,
+        )))
+    elif cmd == "prize-prob":
+        # prize-prob <loto> <num_sets> — 出荷テーブルの exact 入賞確率
+        loto, num_sets = sys.argv[2], int(sys.argv[3])
+        port = [tuple(t) for t in lp._PRECOMPUTED_BEST_FOUND_PORTFOLIOS[(loto, num_sets)]]
+        print(json.dumps({"loto": loto, "num_sets": num_sets,
+                          "prize_prob": exact_prize_prob(port, loto)}))
     elif cmd == "emit":
         emit_table()
     elif cmd == "emit-plus":

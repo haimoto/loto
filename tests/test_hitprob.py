@@ -120,23 +120,23 @@ _BEST_FOUND_FAIL3 = {
     ("loto6", 11): 4365806,
     ("loto6", 12): 4223057,
     ("loto6", 13): 4079965,
-    ("loto6", 14): 3938577,
-    ("loto6", 15): 3809045,
+    ("loto6", 14): 3937272,
+    ("loto6", 15): 3808860,
     ("loto7", 11): 1797292,
-    ("loto7", 12): 1543360,
-    ("loto7", 13): 1298518,
-    ("loto7", 14): 1051869,
-    ("loto7", 15): 831014,
-    ("loto6", 16): 3684920,
-    ("loto6", 17): 3562131,
-    ("loto6", 18): 3446997,
-    ("loto6", 19): 3326378,
-    ("loto6", 20): 3211133,
-    ("loto7", 16): 708921,
-    ("loto7", 17): 610060,
-    ("loto7", 18): 505817,
-    ("loto7", 19): 407876,
-    ("loto7", 20): 345176,
+    ("loto7", 12): 1537623,
+    ("loto7", 13): 1286253,
+    ("loto7", 14): 1042922,
+    ("loto7", 15): 809567,
+    ("loto6", 16): 3682945,
+    ("loto6", 17): 3559713,
+    ("loto6", 18): 3434680,
+    ("loto6", 19): 3312775,
+    ("loto6", 20): 3190362,
+    ("loto7", 16): 624359,
+    ("loto7", 17): 533887,
+    ("loto7", 18): 439570,
+    ("loto7", 19): 352783,
+    ("loto7", 20): 271446,
 }
 
 
@@ -147,34 +147,112 @@ def test_best_found_portfolio_matches_lock(loto, num_sets):
     assert fail3 == _BEST_FOUND_FAIL3[(loto, num_sets)]
 
 
-@pytest.mark.parametrize(
-    "loto,num_sets,removed,old_fail3",
-    [
-        ("loto7", 13, 12, 1299108),
-        ("loto7", 17, 5, 616250),
-        ("loto6", 19, 7, 3336190),
-    ],
-)
-def test_shrunk_next_size_source_matches_updated_mask_table(
-    loto, num_sets, removed, old_fail3,
-):
-    source = _portfolio(loto, num_sets + 1)
-    candidate = source[:removed] + source[removed + 1:]
-    fail3 = lp._fail_count_under_threshold(candidate, loto, 3)
+# v5.11 は 11-20口の一部を「隣接する大きい best-found から1口削除」して導出したため、
+# 「N口テーブル == N+1口テーブルの縮約」という関係を test_shrunk_next_size_source_
+# matches_updated_mask_table で固定していた。v5.12 で全組数を独立に再探索した結果、
+# 縮約より良い構造が見つかりその関係は失われたので、当該テストは削除した。
+# shrink_next_portfolio 自体は導出プリミティブとして有用なので残し、出荷テーブルとの
+# 一致を要求していた assert だけを外す。
+def test_shrink_next_portfolio_returns_true_minimum():
+    """縮約は「全1口削除候補の最小」を正しく返すが、独立再探索の出荷値には届かない。
 
-    assert opt.portfolio_to_masks(candidate) == opt.BEST_PLUS_MASKS[(loto, num_sets)]
-    assert fail3 == _BEST_FOUND_FAIL3[(loto, num_sets)]
-    assert fail3 < old_fail3
-
-
-def test_shrink_next_portfolio_finds_best_loto7_thirteen_set_candidate():
+    返り値の整合（candidate が実際に removed を抜いたもので、fail3 がその実測値）まで
+    見ないと、誤った fail3 を返す実装でも「出荷以上」の緩い assert は通ってしまう。
+    """
     fail3, candidate, removed = opt.shrink_next_portfolio(
         "loto7", 13, verbose=False,
     )
+    source = [tuple(t) for t in _portfolio("loto7", 14)]
 
-    assert removed == 12
-    assert fail3 == _BEST_FOUND_FAIL3[("loto7", 13)]
-    assert opt.portfolio_to_masks(candidate) == opt.BEST_PLUS_MASKS[("loto7", 13)]
+    assert 0 <= removed < 14
+    assert [tuple(t) for t in candidate] == source[:removed] + source[removed + 1:]
+    assert fail3 == lp._fail_count_under_threshold(candidate, "loto7", 3)
+
+    best = min(
+        lp._fail_count_under_threshold(source[:i] + source[i + 1:], "loto7", 3)
+        for i in range(14)
+    )
+    assert fail3 == best, "全削除候補の最小を返していない"
+    assert fail3 >= _BEST_FOUND_FAIL3[("loto7", 13)]
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [(a, b) for a in range(8) for b in range(3) if a + b <= 7],
+)
+def test_prize_condition_is_equivalent_to_classify_prize(a, b):
+    """入賞条件 `a>=3 かつ a+b>=4` が classify_prize と同値であることを全 (a,b) で確認。
+
+    exact_prize_prob はこの同値変形の上に建っているので、ここが崩れると
+    入賞確率の値そのものが無意味になる。数え上げ機構ではなく条件式の検証。
+    """
+    ticket = tuple(range(1, 8))
+    # 本数字: ticket 内から a 個 + ticket 外から 7-a 個
+    main = list(range(1, a + 1)) + list(range(20, 20 + (7 - a)))
+    # ボーナス: ticket 内の残りから b 個 + ticket 外から 2-b 個（main と重ならない帯）
+    bonus = list(range(a + 1, a + 1 + b)) + list(range(30, 30 + (2 - b)))
+    assert len(main) == 7 and len(bonus) == 2
+    assert not (set(main) & set(bonus)), "本数字とボーナスが重複している"
+    assert len(set(ticket) & set(main)) == a
+    assert len(set(ticket) & set(bonus)) == b
+
+    draw = lp.Draw(number=0, date="", main=tuple(sorted(main)), bonus=tuple(sorted(bonus)))
+    won = lp.classify_prize(ticket, draw, "loto7") is not None
+    assert won == (a >= 3 and a + b >= 4), (a, b, won)
+
+
+def test_exact_prize_prob_matches_independent_enumeration():
+    """exact 入賞確率の閉形式を、独立な数え上げ機構と突き合わせる。
+
+    loto7 は C(37,7)*C(30,2) が 44 億通りで全列挙できないため、完全非重複 5口
+    （= 閉形式の u=0 と u>0 の両方が出る構造）について、本数字とボーナスを
+    同時に分配する別解法で数え、値が一致することを見る。
+    勝ち条件そのものの正しさは
+    test_prize_condition_is_equivalent_to_classify_prize が担保する。
+    """
+    pytest.importorskip("numpy")  # exact_prize_prob は numpy を使う（導出ツール側のみ）
+    from math import comb as _c
+
+    port = [tuple(range(1 + 7 * k, 8 + 7 * k)) for k in range(5)]
+    closed = opt.exact_prize_prob(port, "loto7")
+
+    # 別解法: グループ（各口7個 + 未使用2個）へ本数字7個・ボーナス2個を同時に分配
+    sizes = [7] * 5 + [2]
+    total = _c(37, 7) * _c(30, 2)
+    win = 0
+    checked = 0
+
+    def rec(g, xs, ys, rx, ry, ways):
+        nonlocal win, checked
+        if g == len(sizes):
+            if rx or ry:
+                return
+            checked += ways
+            if any(xs[i] >= 3 and xs[i] + ys[i] >= 4 for i in range(5)):
+                win += ways
+            return
+        c = sizes[g]
+        for x in range(min(c, rx) + 1):
+            for y in range(min(c - x, ry) + 1):
+                rec(g + 1, xs + [x], ys + [y], rx - x, ry - y,
+                    ways * _c(c, x) * _c(c - x, y))
+
+    rec(0, [], [], 7, 2, 1)
+    assert checked == total, "全列挙の検算が合わない"
+    assert abs(closed - win / total) < 1e-12
+
+
+def test_shipped_tables_pass_the_prize_probability_gate():
+    """v5.12 の採用ゲート: 更新した loto7 の構造は入賞確率も非悪化していること。
+
+    any3 と入賞確率は P(win)=P(any3)*P(win|any3) の関係で、条件付き側が下がれば
+    any3 改善でも入賞確率は悪化しうる。テーブル更新時にその向きを固定する。
+    """
+    pytest.importorskip("numpy")  # exact_prize_prob は numpy を使う（導出ツール側のみ）
+    # exact 列挙は1ケース約1分かかるので、改善幅が最大の 20口だけを固定する。
+    # 出荷前は全組数で optimize_hitprob_extended.py prize-prob を回して確認すること。
+    port = [tuple(t) for t in lp._PRECOMPUTED_BEST_FOUND_PORTFOLIOS[("loto7", 20)]]
+    assert opt.exact_prize_prob(port, "loto7") >= 0.6192
 
 
 def test_any3_strictly_increases_with_num_sets_up_to_cap():
