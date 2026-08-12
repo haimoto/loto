@@ -132,7 +132,9 @@ def page_state(tab: Tab, loto: str) -> dict:
         "var k=t.match(/A[~～]([A-Z])枠/);o.push('maxframe=' + (k?k[1]:'-'));"
         "o.push('grids=' + document.querySelectorAll('.m_lotteryNumInputNum').length);"
         "o.push('filled=' + document.querySelectorAll('.m_lotteryNumInputNum_btn.is_myself').length);"
-        "o.push('login=' + (/ログアウト/.test(t) ? 'yes' : 'no'));"
+        # 「ログアウト」リンクはドロップダウン内で innerText に出ないことがある。
+        # 会員名（「〜様」）が取れていればログイン済みとみなす。
+        "o.push('login=' + ((m || /ログアウト/.test(t)) ? 'yes' : 'no'));"
         "return o.join('" + SEP + "');})()"
     )
     raw = tab.js(js)
